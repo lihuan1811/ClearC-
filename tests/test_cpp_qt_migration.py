@@ -36,6 +36,9 @@ def test_cpp_qt_project_has_build_entrypoints():
     assert "cmake -S ." in workflow
     assert "windeployqt" in workflow
     assert "CDriveCleanerQt.zip" in workflow
+    assert "CDriveCleanerQt-Portable.exe" in workflow
+    assert "choco install nsis" in workflow
+    assert "makensis.exe" in workflow
     assert "gh release create" in workflow
 
 
