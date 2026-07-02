@@ -1,0 +1,9 @@
+build/
+cmake-build-*/
+__pycache__/
+*.pyc
+.DS_Store
+*.user
+*.zip
+package/
+release-assets/
