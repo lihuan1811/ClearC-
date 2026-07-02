@@ -29,6 +29,10 @@ def test_cpp_qt_project_has_build_entrypoints():
     assert "CDriveCleanerQt" in cmake
 
     assert "jurplel/install-qt-action" in workflow
+    assert "windows-2022" in workflow
+    assert '"src/**"' in workflow
+    assert '"CMakeLists.txt"' in workflow
+    assert '"cpp_qt/**"' not in workflow
     assert "cmake -S ." in workflow
     assert "windeployqt" in workflow
     assert "CDriveCleanerQt.zip" in workflow
