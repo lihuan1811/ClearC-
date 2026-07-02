@@ -65,6 +65,30 @@ def test_cleanup_engine_ports_c_drive_rules_and_cleaning_modes():
         assert token in source
 
 
+def test_cleanup_engine_protects_scan_only_items_and_backup_failures():
+    header = read(SRC / "CleanupEngine.h")
+    source = read(SRC / "CleanupEngine.cpp")
+
+    for token in [
+        "struct CleanResult",
+        "cleanEntriesDetailed",
+        "attemptedCount",
+        "skippedCount",
+        "QStringList errors",
+    ]:
+        assert token in header
+
+    for token in [
+        "if (entry.scanOnly && !options.allowScanOnly)",
+        "const QStringList targets = entry.files;",
+        "backupFile(path, backupRoot, &backupError)",
+        "result.errors.push_back(backupError)",
+        "result.errors.push_back(error)",
+        "QCryptographicHash::hash(normalizedPath.toUtf8(), QCryptographicHash::Sha256)",
+    ]:
+        assert token in source
+
+
 def test_system_catalog_ports_optimization_bx_and_repair_commands():
     source = read(SRC / "SystemCatalog.cpp")
 
@@ -136,5 +160,22 @@ def test_main_window_ports_all_expected_pages_and_async_workflows():
         "兑换卡密",
         "QtConcurrent::run",
         "QFutureWatcher",
+    ]:
+        assert token in source
+
+
+def test_main_window_guards_destructive_cleanup_and_file_deletes():
+    source = read(SRC / "MainWindow.cpp")
+
+    for token in [
+        "bool MainWindow::allowScanOnly() const {\n    return false;",
+        "confirmDestructiveAction",
+        "仅统计项目不会被删除",
+        "scanWatcher_->isRunning()",
+        "cleanEntriesDetailed",
+        "currentTab != 0 && currentTab != 1",
+        "将永久删除选中的 %1 个文件",
+        "CleanupEngine::deletePath(path, &error)",
+        "table->removeRow(row)",
     ]:
         assert token in source

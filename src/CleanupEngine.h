@@ -61,6 +61,14 @@ struct CleanOptions {
     QString backupRoot;
 };
 
+struct CleanResult {
+    qint64 cleanedBytes = 0;
+    int attemptedCount = 0;
+    int deletedCount = 0;
+    int skippedCount = 0;
+    QStringList errors;
+};
+
 class CleanupEngine {
 public:
     enum class CleanMode {
@@ -80,6 +88,11 @@ public:
         CleanMode mode
     ) const;
     qint64 cleanEntries(
+        const QVector<CleanupEntry>& entries,
+        const CleanOptions& options,
+        const ProgressCallback& progress = {}
+    ) const;
+    CleanResult cleanEntriesDetailed(
         const QVector<CleanupEntry>& entries,
         const CleanOptions& options,
         const ProgressCallback& progress = {}
@@ -113,5 +126,5 @@ private:
         const ProgressCallback& progress,
         int* count
     );
-    static bool backupFile(const QString& source, const QString& backupRoot);
+    static bool backupFile(const QString& source, const QString& backupRoot, QString* error = nullptr);
 };

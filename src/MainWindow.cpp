@@ -15,12 +15,16 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QProcess>
+#include <QSet>
 #include <QSettings>
 #include <QSplitter>
 #include <QStyle>
 #include <QTableWidgetItem>
 #include <QTimer>
 #include <QVBoxLayout>
+
+#include <algorithm>
+#include <functional>
 
 namespace {
 
@@ -43,6 +47,30 @@ void setTableStretch(QTableWidget* table) {
     table->verticalHeader()->setVisible(false);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setAlternatingRowColors(true);
+}
+
+QString cleanResultMessage(const CleanResult& result) {
+    QString message = QStringLiteral("处理完成: %1\n已处理文件: %2\n已跳过文件: %3")
+        .arg(CleanupEngine::formatSize(result.cleanedBytes))
+        .arg(result.deletedCount)
+        .arg(result.skippedCount);
+    if (!result.errors.isEmpty()) {
+        message += QStringLiteral("\n\n失败明细:\n") + result.errors.mid(0, 12).join(QStringLiteral("\n"));
+        if (result.errors.size() > 12) {
+            message += QStringLiteral("\n... 还有 %1 条").arg(result.errors.size() - 12);
+        }
+    }
+    return message;
+}
+
+bool confirmDestructiveAction(QWidget* parent, const QString& title, const QString& message) {
+    return QMessageBox::question(
+        parent,
+        title,
+        message,
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No
+    ) == QMessageBox::Yes;
 }
 
 }  // namespace
@@ -526,10 +554,14 @@ QVector<CleanupEntry> MainWindow::selectedCleanupEntries() const {
 }
 
 bool MainWindow::allowScanOnly() const {
-    return currentCleanMode() != CleanupEngine::CleanMode::Recommended;
+    return false;
 }
 
 void MainWindow::cleanSelected() {
+    if (scanWatcher_->isRunning()) {
+        QMessageBox::information(this, QStringLiteral("清理选中"), QStringLiteral("扫描进行中，请等待扫描完成后再清理。"));
+        return;
+    }
     const QVector<CleanupEntry> selected = selectedCleanupEntries();
     if (selected.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("清理选中"), QStringLiteral("请先勾选需要清理的项目。"));
@@ -539,19 +571,53 @@ void MainWindow::cleanSelected() {
     options.simulate = simulateMode_->isChecked();
     options.backup = backupMode_->isChecked();
     options.allowScanOnly = allowScanOnly();
-    const qint64 cleaned = cleanupEngine_.cleanEntries(selected, options);
-    QMessageBox::information(this, QStringLiteral("清理选中"), QStringLiteral("处理完成: %1").arg(CleanupEngine::formatSize(cleaned)));
+    if (!options.simulate && !confirmDestructiveAction(
+            this,
+            QStringLiteral("清理选中"),
+            QStringLiteral("将删除选中清理项中的可清理文件。仅统计项目不会被删除。\n\n删除前备份: %1")
+                .arg(options.backup ? QStringLiteral("开启") : QStringLiteral("关闭"))
+        )) {
+        return;
+    }
+    const CleanResult result = cleanupEngine_.cleanEntriesDetailed(selected, options);
+    const QString message = cleanResultMessage(result);
+    if (result.errors.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("清理选中"), message);
+    } else {
+        QMessageBox::warning(this, QStringLiteral("清理选中"), message);
+    }
     startScan();
 }
 
 void MainWindow::cleanAllForCurrentMode() {
+    if (scanWatcher_->isRunning()) {
+        QMessageBox::information(this, QStringLiteral("一键清理"), QStringLiteral("扫描进行中，请等待扫描完成后再清理。"));
+        return;
+    }
     CleanOptions options;
     options.simulate = simulateMode_->isChecked();
     options.backup = backupMode_->isChecked();
     options.allowScanOnly = allowScanOnly();
     const QVector<CleanupEntry> entries = cleanupEngine_.entriesForMode(cleanupEntries_, currentCleanMode());
-    const qint64 cleaned = cleanupEngine_.cleanEntries(entries, options);
-    QMessageBox::information(this, QStringLiteral("一键清理"), QStringLiteral("处理完成: %1").arg(CleanupEngine::formatSize(cleaned)));
+    if (entries.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("一键清理"), QStringLiteral("请先扫描出可清理项目。"));
+        return;
+    }
+    if (!options.simulate && !confirmDestructiveAction(
+            this,
+            QStringLiteral("一键清理"),
+            QStringLiteral("将按当前模式删除可清理文件。仅统计项目不会被删除。\n\n删除前备份: %1")
+                .arg(options.backup ? QStringLiteral("开启") : QStringLiteral("关闭"))
+        )) {
+        return;
+    }
+    const CleanResult result = cleanupEngine_.cleanEntriesDetailed(entries, options);
+    const QString message = cleanResultMessage(result);
+    if (result.errors.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("一键清理"), message);
+    } else {
+        QMessageBox::warning(this, QStringLiteral("一键清理"), message);
+    }
     startScan();
 }
 
@@ -780,14 +846,64 @@ void MainWindow::populateDuplicateFiles(const QVector<QVector<FileEntry>>& group
 }
 
 void MainWindow::deleteSelectedFileItems() {
-    QTableWidget* table = fileTabs_->currentIndex() == 0 ? largeFileTable_ : duplicateFileTable_;
+    const int currentTab = fileTabs_->currentIndex();
+    if (currentTab != 0 && currentTab != 1) {
+        QMessageBox::information(this, QStringLiteral("删除选中文件"), QStringLiteral("请在大文件或重复文件页签中选择文件。"));
+        return;
+    }
+
+    QTableWidget* table = currentTab == 0 ? largeFileTable_ : duplicateFileTable_;
     const int pathColumn = table == largeFileTable_ ? 2 : 3;
     const QModelIndexList rows = table->selectionModel()->selectedRows();
-    for (const QModelIndex& index : rows) {
-        const QString path = table->item(index.row(), pathColumn)->text();
-        CleanupEngine::deletePath(path);
+    if (rows.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("删除选中文件"), QStringLiteral("请先选择要删除的文件。"));
+        return;
     }
-    fileStatusLabel_->setText(QStringLiteral("删除选中文件完成。"));
+
+    if (!confirmDestructiveAction(
+            this,
+            QStringLiteral("删除选中文件"),
+            QStringLiteral("将永久删除选中的 %1 个文件。此操作不会自动备份。").arg(rows.size())
+        )) {
+        return;
+    }
+
+    QSet<int> rowNumbers;
+    for (const QModelIndex& index : rows) {
+        rowNumbers.insert(index.row());
+    }
+
+    QStringList errors;
+    QVector<int> deletedRows;
+    for (int row : rowNumbers) {
+        QTableWidgetItem* pathItem = table->item(row, pathColumn);
+        if (!pathItem) {
+            errors.push_back(QStringLiteral("缺少文件路径: 第 %1 行").arg(row + 1));
+            continue;
+        }
+        const QString path = pathItem->text();
+        QString error;
+        if (CleanupEngine::deletePath(path, &error)) {
+            deletedRows.push_back(row);
+        } else {
+            errors.push_back(error);
+        }
+    }
+
+    std::sort(deletedRows.begin(), deletedRows.end(), std::greater<int>());
+    for (int row : deletedRows) {
+        table->removeRow(row);
+    }
+
+    const QString summary = QStringLiteral("删除完成: %1 个，失败: %2 个。")
+        .arg(deletedRows.size())
+        .arg(errors.size());
+    fileStatusLabel_->setText(summary);
+    if (!errors.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("删除选中文件"), summary + QStringLiteral("\n\n") + errors.mid(0, 12).join(QStringLiteral("\n")));
+    } else {
+        QMessageBox::information(this, QStringLiteral("删除选中文件"), summary);
+    }
 }
 
 void MainWindow::scanFragments() {

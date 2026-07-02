@@ -36,8 +36,25 @@ bool containsAnyMarker(const QString& normalizedPath, const QStringList& markers
 
 QString uniqueBackupPath(const QString& backupRoot, const QString& source) {
     const QFileInfo info(source);
-    const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss-zzz"));
-    return QDir(backupRoot).filePath(stamp + QStringLiteral("-") + info.fileName());
+    const QString normalizedPath = QDir::toNativeSeparators(info.absoluteFilePath()).toLower();
+    const QString pathDigest = QString::fromLatin1(
+        QCryptographicHash::hash(normalizedPath.toUtf8(), QCryptographicHash::Sha256).toHex().left(16)
+    );
+    const QString destinationDir = QDir(backupRoot).filePath(pathDigest);
+    QDir().mkpath(destinationDir);
+
+    const QString baseName = info.completeBaseName().isEmpty() ? info.fileName() : info.completeBaseName();
+    const QString suffix = info.suffix();
+    QString candidate = QDir(destinationDir).filePath(info.fileName());
+    int counter = 1;
+    while (QFileInfo::exists(candidate)) {
+        const QString numberedName = suffix.isEmpty()
+            ? QStringLiteral("%1-%2").arg(baseName).arg(counter)
+            : QStringLiteral("%1-%2.%3").arg(baseName).arg(counter).arg(suffix);
+        candidate = QDir(destinationDir).filePath(numberedName);
+        ++counter;
+    }
+    return candidate;
 }
 
 }  // namespace
@@ -130,40 +147,65 @@ qint64 CleanupEngine::cleanEntries(
     const CleanOptions& options,
     const ProgressCallback& progress
 ) const {
-    qint64 cleanedBytes = 0;
+    return cleanEntriesDetailed(entries, options, progress).cleanedBytes;
+}
+
+CleanResult CleanupEngine::cleanEntriesDetailed(
+    const QVector<CleanupEntry>& entries,
+    const CleanOptions& options,
+    const ProgressCallback& progress
+) const {
+    CleanResult result;
     int count = 0;
     const QString backupRoot = options.backupRoot.isEmpty() ? defaultBackupRoot() : options.backupRoot;
 
     for (const CleanupEntry& entry : entries) {
         if (entry.scanOnly && !options.allowScanOnly) {
+            result.skippedCount += qMax(1, entry.files.size());
             continue;
         }
 
-        const QStringList targets = entry.files.isEmpty() ? QStringList{entry.path} : entry.files;
+        if (entry.files.isEmpty()) {
+            ++result.skippedCount;
+            continue;
+        }
+
+        const QStringList targets = entry.files;
         for (const QString& path : targets) {
             if (progress) {
                 progress(path, count);
             }
             ++count;
+            ++result.attemptedCount;
 
             const qint64 size = fileSize(path);
             if (options.simulate) {
-                cleanedBytes += size;
+                result.cleanedBytes += size;
+                ++result.deletedCount;
                 continue;
             }
 
             if (options.backup) {
-                backupFile(path, backupRoot);
+                QString backupError;
+                if (!backupFile(path, backupRoot, &backupError)) {
+                    ++result.skippedCount;
+                    result.errors.push_back(backupError);
+                    continue;
+                }
             }
 
             QString error;
             if (deletePath(path, &error)) {
-                cleanedBytes += size;
+                result.cleanedBytes += size;
+                ++result.deletedCount;
+            } else {
+                ++result.skippedCount;
+                result.errors.push_back(error);
             }
         }
     }
 
-    return cleanedBytes;
+    return result;
 }
 
 QVector<CleanupRule> CleanupEngine::cleanupRules() {
@@ -548,12 +590,23 @@ void CleanupEngine::collectRuleFiles(
     }
 }
 
-bool CleanupEngine::backupFile(const QString& source, const QString& backupRoot) {
+bool CleanupEngine::backupFile(const QString& source, const QString& backupRoot, QString* error) {
     QFileInfo info(source);
     if (!info.exists() || !info.isFile()) {
         return true;
     }
-    QDir().mkpath(backupRoot);
+    if (!QDir().mkpath(backupRoot)) {
+        if (error) {
+            *error = QStringLiteral("创建备份目录失败: %1").arg(backupRoot);
+        }
+        return false;
+    }
     const QString destination = uniqueBackupPath(backupRoot, source);
-    return QFile::copy(source, destination);
+    if (!QFile::copy(source, destination)) {
+        if (error) {
+            *error = QStringLiteral("备份失败，已跳过删除: %1").arg(source);
+        }
+        return false;
+    }
+    return true;
 }
