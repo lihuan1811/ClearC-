@@ -43,7 +43,32 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path package -Force | Out-Null
           Copy-Item -LiteralPath "build/Release/C DiskGlow.exe" -Destination "package/C DiskGlow.exe" -Force
-          windeployqt "package/C DiskGlow.exe"
+          windeployqt --compiler-runtime "package/C DiskGlow.exe"
+
+      - name: Bundle MSVC runtime
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Redist.14.Latest -property installationPath
+          if ([string]::IsNullOrWhiteSpace($vsInstall)) {
+            throw "Visual Studio installation with VC redist was not found."
+          }
+
+          $redistRoot = Join-Path $vsInstall "VC\Redist\MSVC"
+          $crtDir = Get-ChildItem -Path $redistRoot -Recurse -Directory |
+            Where-Object { $_.FullName -match "\\x64\\Microsoft\.VC\d+\.CRT$" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $crtDir) {
+            throw "MSVC x64 CRT redistributable directory was not found under $redistRoot."
+          }
+
+          Copy-Item -Path (Join-Path $crtDir.FullName "*.dll") -Destination package -Force
+          foreach ($dll in @("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
+            if (!(Test-Path (Join-Path "package" $dll))) {
+              throw "Required MSVC runtime DLL is missing from package: $dll"
+            }
+          }
 
       - name: Zip package
         shell: pwsh

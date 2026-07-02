@@ -34,7 +34,12 @@ def test_cpp_qt_project_has_build_entrypoints():
     assert '"CMakeLists.txt"' in workflow
     assert '"cpp_qt/**"' not in workflow
     assert "cmake -S ." in workflow
-    assert "windeployqt" in workflow
+    assert "windeployqt --compiler-runtime" in workflow
+    assert "Bundle MSVC runtime" in workflow
+    assert "Microsoft.VisualStudio.Component.VC.Redist.14.Latest" in workflow
+    assert "msvcp140.dll" in workflow
+    assert "vcruntime140.dll" in workflow
+    assert "vcruntime140_1.dll" in workflow
     assert "CDriveCleanerQt.zip" in workflow
     assert "CDriveCleanerQt-Portable.exe" in workflow
     assert "choco install nsis" in workflow
