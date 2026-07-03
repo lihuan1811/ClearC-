@@ -69,6 +69,20 @@ struct CleanResult {
     QStringList errors;
 };
 
+struct BackupRecord {
+    QString id;
+    QString sourcePath;
+    QString backupPath;
+    qint64 size = 0;
+    QDateTime createdAt;
+};
+
+struct BackupInfo {
+    QString backupRoot;
+    QVector<BackupRecord> backups;
+    qint64 totalBytes = 0;
+};
+
 class CleanupEngine {
 public:
     enum class CleanMode {
@@ -110,6 +124,11 @@ public:
         int maxFiles = 50000
     );
     static bool deletePath(const QString& path, QString* error = nullptr);
+    static QString backupRoot();
+    static BackupInfo backupInfo(const QString& backupRoot = {});
+    static bool restoreBackupItem(const BackupRecord& record, QString* error = nullptr);
+    static bool deleteBackupItem(const BackupRecord& record, QString* error = nullptr);
+    static bool pruneBackups(const QString& backupRoot = {}, int maxBackups = 5, qint64 maxBytes = 1024LL * 1024LL * 1024LL);
 
 private:
     static QString envPath(const QString& name, const QString& fallback);
@@ -117,7 +136,6 @@ private:
     static bool pathMatches(const QString& path, const CleanupRule& rule);
     static qint64 fileSize(const QString& path);
     static QString fileDigest(const QString& path);
-    static QString defaultBackupRoot();
     static void collectRuleFiles(
         const CleanupRule& rule,
         const QString& rootPath,
@@ -127,4 +145,5 @@ private:
         int* count
     );
     static bool backupFile(const QString& source, const QString& backupRoot, QString* error = nullptr);
+    static QString defaultBackupRoot();
 };

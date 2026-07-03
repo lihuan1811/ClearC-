@@ -1,4 +1,5 @@
 #include "CleanupEngine.h"
+#include "DismRuleScanner.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -8,6 +9,7 @@
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QStandardPaths>
+#include <QTextStream>
 
 #include <algorithm>
 
@@ -55,6 +57,33 @@ QString uniqueBackupPath(const QString& backupRoot, const QString& source) {
         ++counter;
     }
     return candidate;
+}
+
+QString manifestPath(const QString& backupRoot) {
+    return QDir(backupRoot).filePath(QStringLiteral("manifest.tsv"));
+}
+
+QString escapeManifestField(QString value) {
+    value.replace(QLatin1Char('\t'), QStringLiteral(" "));
+    value.replace(QLatin1Char('\n'), QStringLiteral(" "));
+    return value;
+}
+
+void appendBackupManifest(const QString& backupRoot, const QString& source, const QString& backupPath, qint64 size) {
+    QFile file(manifestPath(backupRoot));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        return;
+    }
+    QTextStream stream(&file);
+    const QString id = QString::fromLatin1(QCryptographicHash::hash(
+        QStringLiteral("%1|%2|%3").arg(source, backupPath, QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)).toUtf8(),
+        QCryptographicHash::Sha256
+    ).toHex());
+    stream << id << '\t'
+           << QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs) << '\t'
+           << size << '\t'
+           << escapeManifestField(source) << '\t'
+           << escapeManifestField(backupPath) << '\n';
 }
 
 }  // namespace
@@ -111,6 +140,22 @@ CleanupScanResult CleanupEngine::scanSystem(const ProgressCallback& progress) {
                 result.professionalBytes += totalSize;
             }
         }
+    }
+
+    for (const DismRuleEntry& dismEntry : DismRuleScanner().scan()) {
+        CleanupEntry entry;
+        entry.ruleId = QStringLiteral("dismpp_rules");
+        entry.title = QStringLiteral("Dism++规则 - %1").arg(dismEntry.ruleName);
+        entry.path = dismEntry.path;
+        entry.files = {dismEntry.path};
+        entry.size = dismEntry.size;
+        entry.scanOnly = false;
+        entry.recommended = false;
+        entry.professional = true;
+        result.entries.push_back(entry);
+        result.totalBytes += entry.size;
+        result.professionalBytes += entry.size;
+        ++count;
     }
 
     result.scannedCount = count;
@@ -248,6 +293,38 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
     add(QStringLiteral("temp_files"), QStringLiteral("系统临时文件"),
         {envPath(QStringLiteral("TEMP"), winJoin({localAppData, QStringLiteral("Temp")})), winJoin({systemRoot, QStringLiteral("Temp")})},
         false, {QStringLiteral("*.tmp"), QStringLiteral("*.temp"), QStringLiteral("*.log"), QStringLiteral("*")});
+    add(QStringLiteral("chrome_cache"), QStringLiteral("Chrome 缓存"),
+        {winJoin({localAppData, QStringLiteral("Google"), QStringLiteral("Chrome"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Cache")}),
+         winJoin({localAppData, QStringLiteral("Google"), QStringLiteral("Chrome"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Code Cache")}),
+         winJoin({localAppData, QStringLiteral("Google"), QStringLiteral("Chrome"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("GPUCache")})},
+        false);
+    add(QStringLiteral("edge_cache"), QStringLiteral("Edge 缓存"),
+        {winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Cache")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Code Cache")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("GPUCache")})},
+        false);
+    add(QStringLiteral("firefox_cache"), QStringLiteral("Firefox 缓存"),
+        {winJoin({appData, QStringLiteral("Mozilla"), QStringLiteral("Firefox"), QStringLiteral("Profiles")})},
+        false, {}, {QStringLiteral("\\cache2\\entries\\")});
+    add(QStringLiteral("browser_cookies"), QStringLiteral("浏览器 Cookie"),
+        {winJoin({localAppData, QStringLiteral("Google"), QStringLiteral("Chrome"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Network"), QStringLiteral("Cookies")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Network"), QStringLiteral("Cookies")}),
+         winJoin({appData, QStringLiteral("Mozilla"), QStringLiteral("Firefox"), QStringLiteral("Profiles")})},
+        true, {QStringLiteral("Cookies"), QStringLiteral("cookies.sqlite")}, {}, false, true);
+    add(QStringLiteral("browser_history"), QStringLiteral("浏览器历史记录"),
+        {winJoin({localAppData, QStringLiteral("Google"), QStringLiteral("Chrome"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("History")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("History")}),
+         winJoin({appData, QStringLiteral("Mozilla"), QStringLiteral("Firefox"), QStringLiteral("Profiles")})},
+        true, {QStringLiteral("History"), QStringLiteral("places.sqlite")}, {}, false, true);
+    add(QStringLiteral("browser_passwords"), QStringLiteral("浏览器保存密码"),
+        {winJoin({localAppData, QStringLiteral("Google"), QStringLiteral("Chrome"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Login Data")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Login Data")}),
+         winJoin({appData, QStringLiteral("Mozilla"), QStringLiteral("Firefox"), QStringLiteral("Profiles")})},
+        true, {QStringLiteral("Login Data"), QStringLiteral("logins.json"), QStringLiteral("key4.db")}, {}, false, true);
+    add(QStringLiteral("chrome_update_cache"), QStringLiteral("Chrome 更新缓存"),
+        {winJoin({localAppData, QStringLiteral("Google"), QStringLiteral("Update")})}, false);
+    add(QStringLiteral("edge_update_cache"), QStringLiteral("Edge 更新缓存"),
+        {winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("EdgeUpdate")})}, false);
     add(QStringLiteral("prefetch"), QStringLiteral("Windows 预读取文件"),
         {winJoin({systemRoot, QStringLiteral("Prefetch")})}, false, {QStringLiteral("*.pf")});
     add(QStringLiteral("windows_update_download"), QStringLiteral("Windows 更新下载缓存"),
@@ -307,6 +384,9 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
          winJoin({systemProfileLocal, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("INetCache")}),
          winJoin({systemProfileLocal, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("WebCache")})},
         true);
+    add(QStringLiteral("system_event_logs"), QStringLiteral("系统事件日志"),
+        {winJoin({systemRoot, QStringLiteral("System32"), QStringLiteral("winevt"), QStringLiteral("Logs")})},
+        true, {QStringLiteral("*.evtx")}, {}, false, true);
     add(QStringLiteral("appx_package_cache"), QStringLiteral("AppData Packages 缓存"),
         {winJoin({localAppData, QStringLiteral("Packages")})}, true, {}, {
             QStringLiteral("\\microsoft.microsoftofficehub_"),
@@ -370,6 +450,54 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
             QStringLiteral("\\wow64_"),
             QStringLiteral("\\x86_"),
         });
+    add(QStringLiteral("vscode_cache"), QStringLiteral("VS Code 缓存"),
+        {winJoin({appData, QStringLiteral("Code"), QStringLiteral("Cache")}),
+         winJoin({appData, QStringLiteral("Code"), QStringLiteral("CachedData")}),
+         winJoin({appData, QStringLiteral("Code"), QStringLiteral("GPUCache")}),
+         winJoin({appData, QStringLiteral("Code"), QStringLiteral("Service Worker"), QStringLiteral("CacheStorage")}),
+         winJoin({appData, QStringLiteral("Code"), QStringLiteral("logs")})},
+        false);
+    add(QStringLiteral("cursor_cache"), QStringLiteral("Cursor 缓存"),
+        {winJoin({appData, QStringLiteral("Cursor"), QStringLiteral("Cache")}),
+         winJoin({appData, QStringLiteral("Cursor"), QStringLiteral("CachedData")}),
+         winJoin({appData, QStringLiteral("Cursor"), QStringLiteral("GPUCache")}),
+         winJoin({appData, QStringLiteral("Cursor"), QStringLiteral("Service Worker"), QStringLiteral("CacheStorage")}),
+         winJoin({appData, QStringLiteral("Cursor"), QStringLiteral("logs")})},
+        false);
+    add(QStringLiteral("discord_cache"), QStringLiteral("Discord 缓存"),
+        {winJoin({appData, QStringLiteral("discord"), QStringLiteral("Cache")}),
+         winJoin({appData, QStringLiteral("discord"), QStringLiteral("Code Cache")}),
+         winJoin({appData, QStringLiteral("discord"), QStringLiteral("GPUCache")}),
+         winJoin({appData, QStringLiteral("discord"), QStringLiteral("Service Worker"), QStringLiteral("CacheStorage")})},
+        false);
+    add(QStringLiteral("steam_web_cache"), QStringLiteral("Steam 网页缓存"),
+        {winJoin({localAppData, QStringLiteral("Steam"), QStringLiteral("htmlcache"), QStringLiteral("Cache")}),
+         winJoin({localAppData, QStringLiteral("Steam"), QStringLiteral("htmlcache"), QStringLiteral("Code Cache")}),
+         winJoin({localAppData, QStringLiteral("Steam"), QStringLiteral("htmlcache"), QStringLiteral("GPUCache")})},
+        false);
+    add(QStringLiteral("slack_cache"), QStringLiteral("Slack 缓存"),
+        {winJoin({appData, QStringLiteral("Slack"), QStringLiteral("Cache")}),
+         winJoin({appData, QStringLiteral("Slack"), QStringLiteral("Code Cache")}),
+         winJoin({appData, QStringLiteral("Slack"), QStringLiteral("GPUCache")}),
+         winJoin({appData, QStringLiteral("Slack"), QStringLiteral("Service Worker"), QStringLiteral("CacheStorage")}),
+         winJoin({appData, QStringLiteral("Slack"), QStringLiteral("logs")})},
+        false);
+    add(QStringLiteral("notion_cache"), QStringLiteral("Notion 缓存"),
+        {winJoin({appData, QStringLiteral("Notion"), QStringLiteral("Cache")}),
+         winJoin({appData, QStringLiteral("Notion"), QStringLiteral("Code Cache")}),
+         winJoin({appData, QStringLiteral("Notion"), QStringLiteral("GPUCache")}),
+         winJoin({appData, QStringLiteral("Notion"), QStringLiteral("Service Worker"), QStringLiteral("CacheStorage")})},
+        false);
+    add(QStringLiteral("obs_cache"), QStringLiteral("OBS Studio 缓存"),
+        {winJoin({appData, QStringLiteral("obs-studio"), QStringLiteral("logs")}),
+         winJoin({appData, QStringLiteral("obs-studio"), QStringLiteral("crashes")}),
+         winJoin({appData, QStringLiteral("obs-studio"), QStringLiteral("plugin_config"), QStringLiteral("obs-browser"), QStringLiteral("Cache")})},
+        false);
+    add(QStringLiteral("c_drive_installers_archives"), QStringLiteral("C盘大型安装包/压缩包/镜像"),
+        {winJoin({userProfile, QStringLiteral("Downloads")}),
+         winJoin({userProfile, QStringLiteral("Desktop")}),
+         systemDrive + QStringLiteral("\\")},
+        true, {QStringLiteral("*.exe"), QStringLiteral("*.msi"), QStringLiteral("*.zip"), QStringLiteral("*.rar"), QStringLiteral("*.7z"), QStringLiteral("*.iso")}, {}, false, true);
     add(QStringLiteral("wechat_special_clean"), QStringLiteral("微信专清"),
         {winJoin({userProfile, QStringLiteral("Documents"), QStringLiteral("WeChat Files")}),
          winJoin({userProfile, QStringLiteral("Documents"), QStringLiteral("xwechat_files")}),
@@ -473,6 +601,101 @@ bool CleanupEngine::deletePath(const QString& path, QString* error) {
     }
     if (!ok && error) {
         *error = QStringLiteral("删除失败: %1").arg(path);
+    }
+    return ok;
+}
+
+QString CleanupEngine::backupRoot() {
+    return defaultBackupRoot();
+}
+
+BackupInfo CleanupEngine::backupInfo(const QString& root) {
+    BackupInfo info;
+    info.backupRoot = root.isEmpty() ? defaultBackupRoot() : root;
+
+    QFile file(manifestPath(info.backupRoot));
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QTextStream stream(&file);
+        while (!stream.atEnd()) {
+            const QString line = stream.readLine();
+            const QStringList parts = line.split(QLatin1Char('\t'));
+            if (parts.size() < 5) {
+                continue;
+            }
+            BackupRecord record;
+            record.id = parts.at(0);
+            record.createdAt = QDateTime::fromString(parts.at(1), Qt::ISODateWithMs);
+            record.size = parts.at(2).toLongLong();
+            record.sourcePath = parts.at(3);
+            record.backupPath = parts.at(4);
+            if (QFileInfo::exists(record.backupPath)) {
+                info.totalBytes += record.size;
+                info.backups.push_back(record);
+            }
+        }
+    }
+
+    std::sort(info.backups.begin(), info.backups.end(), [](const BackupRecord& a, const BackupRecord& b) {
+        return a.createdAt > b.createdAt;
+    });
+    return info;
+}
+
+bool CleanupEngine::restoreBackupItem(const BackupRecord& record, QString* error) {
+    if (!QFileInfo::exists(record.backupPath)) {
+        if (error) {
+            *error = QStringLiteral("备份文件不存在: %1").arg(record.backupPath);
+        }
+        return false;
+    }
+    QDir().mkpath(QFileInfo(record.sourcePath).absolutePath());
+    if (QFile::exists(record.sourcePath)) {
+        QFile::remove(record.sourcePath);
+    }
+    if (!QFile::copy(record.backupPath, record.sourcePath)) {
+        if (error) {
+            *error = QStringLiteral("恢复失败: %1 -> %2").arg(record.backupPath, record.sourcePath);
+        }
+        return false;
+    }
+    return true;
+}
+
+bool CleanupEngine::deleteBackupItem(const BackupRecord& record, QString* error) {
+    QFileInfo info(record.backupPath);
+    if (!info.exists()) {
+        return true;
+    }
+    if (!QFile::remove(record.backupPath)) {
+        if (error) {
+            *error = QStringLiteral("删除备份失败: %1").arg(record.backupPath);
+        }
+        return false;
+    }
+
+    QDir parent(info.absolutePath());
+    if (parent.entryList(QDir::NoDotAndDotDot | QDir::AllEntries).isEmpty()) {
+        parent.removeRecursively();
+    }
+    return true;
+}
+
+bool CleanupEngine::pruneBackups(const QString& root, int maxBackups, qint64 maxBytes) {
+    BackupInfo info = backupInfo(root);
+    bool ok = true;
+    qint64 remainingBytes = info.totalBytes;
+    for (int i = 0; i < info.backups.size(); ++i) {
+        const bool overCount = i >= maxBackups;
+        const bool overBytes = remainingBytes > maxBytes;
+        if (!overCount && !overBytes) {
+            continue;
+        }
+        QString error;
+        if (deleteBackupItem(info.backups.at(i), &error)) {
+            remainingBytes -= info.backups.at(i).size;
+        } else {
+            ok = false;
+        }
     }
     return ok;
 }
@@ -608,5 +831,6 @@ bool CleanupEngine::backupFile(const QString& source, const QString& backupRoot,
         }
         return false;
     }
+    appendBackupManifest(backupRoot, info.absoluteFilePath(), destination, info.size());
     return true;
 }

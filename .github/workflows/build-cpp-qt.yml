@@ -8,6 +8,7 @@ on:
       - master
     paths:
       - "src/**"
+      - "rules/dismpp/**"
       - "CMakeLists.txt"
       - ".github/workflows/build-cpp-qt.yml"
 
@@ -44,6 +45,8 @@ jobs:
           New-Item -ItemType Directory -Path package -Force | Out-Null
           Copy-Item -LiteralPath "build/Release/C DiskGlow.exe" -Destination "package/C DiskGlow.exe" -Force
           windeployqt --compiler-runtime "package/C DiskGlow.exe"
+          New-Item -ItemType Directory -Path "package/rules" -Force | Out-Null
+          Copy-Item -Recurse -Force -Path "rules/dismpp" -Destination "package/rules"
 
       - name: Bundle MSVC runtime
         shell: pwsh

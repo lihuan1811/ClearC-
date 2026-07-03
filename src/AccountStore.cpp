@@ -8,12 +8,16 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QStandardPaths>
+#include <QUuid>
 
 namespace {
+
+const QString remoteAccountApiBaseUrl = QStringLiteral("http://47.93.103.220");
 
 QJsonObject emptyStore() {
     QJsonObject root;
     root.insert(QStringLiteral("currentEmail"), QString());
+    root.insert(QStringLiteral("deviceId"), QUuid::createUuid().toString(QUuid::WithoutBraces));
     root.insert(QStringLiteral("users"), QJsonArray());
     return root;
 }
@@ -97,6 +101,21 @@ bool cardInfo(const QString& code, QString* plan, int* days) {
         *days = 365;
         return true;
     }
+    if (code == QStringLiteral("WINCLEANER-VIP-30D")) {
+        *plan = QStringLiteral("专业会员");
+        *days = 30;
+        return true;
+    }
+    if (code == QStringLiteral("WINCLEANER-VIP-90D")) {
+        *plan = QStringLiteral("专业会员");
+        *days = 90;
+        return true;
+    }
+    if (code == QStringLiteral("WINCLEANER-VIP-365D")) {
+        *plan = QStringLiteral("专业会员");
+        *days = 365;
+        return true;
+    }
     return false;
 }
 
@@ -134,6 +153,9 @@ AccountState AccountStore::registerUser(
     QJsonObject store = QJsonDocument::fromJson(readText().toUtf8()).object();
     if (store.isEmpty()) {
         store = emptyStore();
+    }
+    if (store.value(QStringLiteral("deviceId")).toString().isEmpty()) {
+        store.insert(QStringLiteral("deviceId"), QUuid::createUuid().toString(QUuid::WithoutBraces));
     }
     if (!userForEmail(store, normalized).isEmpty()) {
         return stateFromUser({}, QStringLiteral("该名称已被注册。"));

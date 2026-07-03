@@ -2,6 +2,7 @@
 
 #include "AccountStore.h"
 #include "CleanupEngine.h"
+#include "FileManagementEngine.h"
 #include "SystemCatalog.h"
 
 #include <QCheckBox>
@@ -38,6 +39,8 @@ private:
     QPushButton* primaryButton(const QString& text) const;
     QPushButton* secondaryButton(const QString& text) const;
     void refreshDiskInfo();
+    QWidget* pageHeader(const QString& title, const QString& subtitle) const;
+    void showOperationLog(const QString& message);
 
     void startScan();
     void finishScan();
@@ -48,15 +51,24 @@ private:
     bool allowScanOnly() const;
     void cleanSelected();
     void cleanAllForCurrentMode();
+    void openBackupManager();
 
     void populateStartupItems();
     void populateMemoryItems();
     void populateSystemOptimizationItems();
     void populatePrivacyItems();
     void populateRegistryItems();
+    void populateNvidiaItems();
+    void populateAmdItems();
+    void populateMaintenanceItems();
+    void populateEdgeToolkitItems();
     void populateOptimizerTable(QTreeWidget* table, const QVector<OptimizerItem>& items);
     void runOptimizerAction(const OptimizerItem& item);
     void applyCurrentOptimizationTab();
+    void populateWindowsOptimizationActions();
+    void runWindowsOptimizationAction(int row, bool revert);
+    void runAdBlockAction(bool enable);
+    void runGlobalRestore();
 
     void populateBxItems();
     void applyBxMode(const QString& mode);
@@ -65,11 +77,21 @@ private:
     void refreshInstalledApps();
     void runUninstallCommand(const QString& command);
 
+    void chooseFileRoot();
+    void scanFolderUsage();
     void scanLargeFilesAsync();
     void scanDuplicateFilesAsync();
+    void scanEmptyFolders();
+    void refreshMigrationFolders();
+    void migrateSelectedFolders();
+    void restoreSelectedFolders();
     void populateLargeFiles(const QVector<FileEntry>& files);
     void populateDuplicateFiles(const QVector<QVector<FileEntry>>& groups);
+    void populateFolderUsage(const QVector<FolderUsageEntry>& entries);
+    void populateEmptyFolders(const QVector<EmptyFolderEntry>& folders);
+    void populateMigrationFolders(const QVector<MigrationFolder>& folders);
     void deleteSelectedFileItems();
+    void shredSelectedFileItems();
     void scanFragments();
     void optimizeFragments();
 
@@ -84,6 +106,7 @@ private:
     void logoutAccount();
 
     CleanupEngine cleanupEngine_;
+    FileManagementEngine fileEngine_;
     AccountStore accountStore_;
     QStackedWidget* pages_ = nullptr;
     QVector<QPushButton*> navButtons_;
@@ -105,17 +128,26 @@ private:
 
     QTabWidget* optimizerTabs_ = nullptr;
     QMap<QString, QTreeWidget*> optimizerTables_;
+    QTableWidget* windowsOptimizationTable_ = nullptr;
     QTableWidget* bxTable_ = nullptr;
     QLabel* bxStatusLabel_ = nullptr;
     QString bxMode_ = QStringLiteral("basic");
 
     QTableWidget* uninstallTable_ = nullptr;
     QTabWidget* fileTabs_ = nullptr;
+    QString fileRoot_;
+    QLabel* fileRootLabel_ = nullptr;
+    QTreeWidget* folderUsageTree_ = nullptr;
     QTableWidget* largeFileTable_ = nullptr;
     QTableWidget* duplicateFileTable_ = nullptr;
+    QTableWidget* emptyFolderTable_ = nullptr;
+    QTableWidget* migrationTable_ = nullptr;
+    QLineEdit* migrationTargetEdit_ = nullptr;
+    QCheckBox* migrationMoveFiles_ = nullptr;
     QLabel* fileStatusLabel_ = nullptr;
     QTextEdit* repairLog_ = nullptr;
     QTableWidget* repairTable_ = nullptr;
+    QTextEdit* operationLog_ = nullptr;
 
     QLabel* accountStateLabel_ = nullptr;
     QLineEdit* accountEmailEdit_ = nullptr;

@@ -189,6 +189,96 @@ QVector<RepairItem> SystemCatalog::repairActions() {
         {QStringLiteral("winsock_reset"), QStringLiteral("Winsock 网络重置"), QStringLiteral("安全"), QStringLiteral("重置 Windows 网络套接字目录。"), QStringLiteral("netsh winsock reset"), true},
         {QStringLiteral("flush_dns"), QStringLiteral("DNS 刷新"), QStringLiteral("安全"), QStringLiteral("清空 DNS 解析缓存。"), QStringLiteral("ipconfig /flushdns"), true},
         {QStringLiteral("windows_update_reset"), QStringLiteral("系统更新组件修复"), QStringLiteral("谨慎"), QStringLiteral("重建 SoftwareDistribution 和 catroot2。"), QStringLiteral("net stop wuauserv & net stop bits & net stop cryptsvc & ren %systemroot%\\SoftwareDistribution SoftwareDistribution.old & ren %systemroot%\\System32\\catroot2 catroot2.old & net start cryptsvc & net start bits & net start wuauserv"), false},
+        {QStringLiteral("chkdsk_deep"), QStringLiteral("磁盘错误深度修复"), QStringLiteral("谨慎"), QStringLiteral("安排 C 盘深度修复，可能需要重启。"), QStringLiteral("echo Y|chkdsk C: /F /R"), false},
+        {QStringLiteral("cache_reset"), QStringLiteral("缓存重置修复"), QStringLiteral("谨慎"), QStringLiteral("重置微软商店缓存。"), QStringLiteral("wsreset.exe"), false},
+    };
+}
+
+QVector<WindowsOptimizationAction> SystemCatalog::windowsOptimizationActions() {
+    return {
+        {QStringLiteral("flush_dns"), QStringLiteral("刷新 DNS 缓存"), QStringLiteral("执行 ipconfig /flushdns，清除本机 DNS 解析缓存。"), QStringLiteral("网络"), QStringLiteral("低风险"),
+         {{QStringLiteral("ipconfig"), {QStringLiteral("/flushdns")}, QStringLiteral("刷新 DNS 缓存")}}, {}},
+        {QStringLiteral("reset_winsock"), QStringLiteral("重置 Winsock"), QStringLiteral("执行 netsh winsock reset，修复网络协议栈异常。"), QStringLiteral("网络"), QStringLiteral("中风险"),
+         {{QStringLiteral("netsh"), {QStringLiteral("winsock"), QStringLiteral("reset")}, QStringLiteral("重置 Winsock")}}, {}, true},
+        {QStringLiteral("reset_tcp_ip"), QStringLiteral("重置 TCP/IP"), QStringLiteral("执行 netsh int ip reset，重置 TCP/IP 配置。"), QStringLiteral("网络"), QStringLiteral("中风险"),
+         {{QStringLiteral("netsh"), {QStringLiteral("int"), QStringLiteral("ip"), QStringLiteral("reset")}, QStringLiteral("重置 TCP/IP")}}, {}, true},
+        {QStringLiteral("high_performance_power"), QStringLiteral("切换高性能电源计划"), QStringLiteral("执行 powercfg /setactive SCHEME_MIN，提高性能优先级。"), QStringLiteral("性能"), QStringLiteral("低风险"),
+         {{QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_MIN")}, QStringLiteral("启用高性能电源计划")}},
+         {{QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_BALANCED")}, QStringLiteral("恢复平衡电源计划")}}},
+        {QStringLiteral("disable_hibernation"), QStringLiteral("关闭休眠释放 hiberfil.sys"), QStringLiteral("执行 powercfg /hibernate off，释放休眠文件。"), QStringLiteral("存储"), QStringLiteral("中风险"),
+         {{QStringLiteral("powercfg"), {QStringLiteral("/hibernate"), QStringLiteral("off")}, QStringLiteral("关闭 Windows 休眠")}},
+         {{QStringLiteral("powercfg"), {QStringLiteral("/hibernate"), QStringLiteral("on")}, QStringLiteral("开启 Windows 休眠")}}, true},
+        {QStringLiteral("disable_game_dvr"), QStringLiteral("关闭 Game DVR 录制"), QStringLiteral("写入 GameDVR 注册表项，减少后台录制占用。"), QStringLiteral("性能"), QStringLiteral("低风险"),
+         {{QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\System\\GameConfigStore"), QStringLiteral("/v"), QStringLiteral("GameDVR_Enabled"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("0"), QStringLiteral("/f")}, QStringLiteral("关闭 GameConfigStore GameDVR")},
+          {QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR"), QStringLiteral("/v"), QStringLiteral("AppCaptureEnabled"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("0"), QStringLiteral("/f")}, QStringLiteral("关闭 AppCapture")}},
+         {{QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\System\\GameConfigStore"), QStringLiteral("/v"), QStringLiteral("GameDVR_Enabled"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("1"), QStringLiteral("/f")}, QStringLiteral("恢复 GameDVR")}}},
+        {QStringLiteral("disable_startup_delay"), QStringLiteral("关闭启动应用延迟"), QStringLiteral("写入 Explorer Serialize，减少登录后启动项延迟。"), QStringLiteral("启动"), QStringLiteral("低风险"),
+         {{QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Serialize"), QStringLiteral("/v"), QStringLiteral("StartupDelayInMSec"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("0"), QStringLiteral("/f")}, QStringLiteral("关闭启动延迟")}}},
+        {QStringLiteral("disable_transparency"), QStringLiteral("关闭透明效果"), QStringLiteral("关闭系统透明效果以降低桌面合成开销。"), QStringLiteral("视觉"), QStringLiteral("低风险"),
+         {{QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), QStringLiteral("/v"), QStringLiteral("EnableTransparency"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("0"), QStringLiteral("/f")}, QStringLiteral("关闭透明效果")}}},
+        {QStringLiteral("enable_storage_sense"), QStringLiteral("开启存储感知"), QStringLiteral("开启 Windows 存储感知自动清理临时文件。"), QStringLiteral("存储"), QStringLiteral("低风险"),
+         {{QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\StorageSense\\Parameters\\StoragePolicy"), QStringLiteral("/v"), QStringLiteral("01"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("1"), QStringLiteral("/f")}, QStringLiteral("开启存储感知")}}},
+        {QStringLiteral("disable_search_highlights"), QStringLiteral("关闭搜索高亮"), QStringLiteral("关闭 Windows 搜索框推荐和热点内容。"), QStringLiteral("隐私"), QStringLiteral("低风险"),
+         {{QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\SearchSettings"), QStringLiteral("/v"), QStringLiteral("IsDynamicSearchBoxEnabled"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("0"), QStringLiteral("/f")}, QStringLiteral("关闭搜索高亮")}}},
+        {QStringLiteral("best_visual_performance"), QStringLiteral("调整为最佳性能视觉效果"), QStringLiteral("降低窗口动画、阴影和视觉效果开销。"), QStringLiteral("视觉"), QStringLiteral("中风险"),
+         {{QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VisualEffects"), QStringLiteral("/v"), QStringLiteral("VisualFXSetting"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("2"), QStringLiteral("/f")}, QStringLiteral("最佳性能视觉效果")}}},
+        {QStringLiteral("nvidia_tune"), QStringLiteral("NVIDIA 一键调优"), QStringLiteral("打开 NVIDIA 控制面板并写入常用低延迟电源策略。"), QStringLiteral("显卡"), QStringLiteral("中风险"),
+         {{QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start nvcplui.exe")}, QStringLiteral("打开 NVIDIA 控制面板")}}},
+        {QStringLiteral("amd_tune"), QStringLiteral("AMD 一键调优"), QStringLiteral("打开 AMD Software 并准备图形性能设置。"), QStringLiteral("显卡"), QStringLiteral("中风险"),
+         {{QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start amd-software:")}, QStringLiteral("打开 AMD Software")}}},
+        {QStringLiteral("windows_update_disable"), QStringLiteral("Windows 自动更新：一键禁用"), QStringLiteral("停止 Windows Update 服务并改为禁用。"), QStringLiteral("服务"), QStringLiteral("高风险"),
+         {{QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("sc stop wuauserv & sc config wuauserv start= disabled")}, QStringLiteral("禁用 Windows Update")}}, {}, true},
+        {QStringLiteral("windows_update_enable"), QStringLiteral("Windows 自动更新：一键开启"), QStringLiteral("恢复 Windows Update 服务按需启动。"), QStringLiteral("服务"), QStringLiteral("中风险"),
+         {{QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("sc config wuauserv start= demand & sc start wuauserv")}, QStringLiteral("开启 Windows Update")}}, {}, true},
+        {QStringLiteral("defender_restore"), QStringLiteral("Windows 安全中心：一键恢复"), QStringLiteral("恢复 Defender 相关策略和服务。"), QStringLiteral("安全"), QStringLiteral("中风险"),
+         {{QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("sc config WinDefend start= auto & sc start WinDefend")}, QStringLiteral("恢复 Windows Defender")}}, {}, true},
+        {QStringLiteral("edge_remove"), QStringLiteral("Edge 工具箱：一键彻底删除 Edge"), QStringLiteral("调用 PowerShell 移除 Edge 相关包和更新残留。"), QStringLiteral("浏览器"), QStringLiteral("高风险"),
+         {{QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), QStringLiteral("Get-AppxPackage *MicrosoftEdge* | Remove-AppxPackage")}, QStringLiteral("移除 Edge Appx 包")}}, {}, true},
+        {QStringLiteral("browser_homepage_fix"), QStringLiteral("一键修复浏览器主页篡改"), QStringLiteral("清理常见浏览器主页劫持策略。"), QStringLiteral("浏览器"), QStringLiteral("中风险"),
+         {{QStringLiteral("reg"), {QStringLiteral("delete"), QStringLiteral("HKCU\\Software\\Policies\\Microsoft\\Edge"), QStringLiteral("/f")}, QStringLiteral("清理 Edge 用户策略")},
+          {QStringLiteral("reg"), {QStringLiteral("delete"), QStringLiteral("HKCU\\Software\\Policies\\Google\\Chrome"), QStringLiteral("/f")}, QStringLiteral("清理 Chrome 用户策略")}}},
+    };
+}
+
+QVector<OptimizerItem> SystemCatalog::nvidiaItems() {
+    return {
+        item(QStringLiteral("nvidia-open"), QStringLiteral("NVIDIA 一键调优"), QStringLiteral("打开 NVIDIA 控制面板"), QStringLiteral("nvcplui.exe"), QStringLiteral("进入 NVIDIA 控制面板手动确认全局设置。"), QStringLiteral("start nvcplui.exe"), QStringLiteral("打开"), true, false),
+        item(QStringLiteral("nvidia-power"), QStringLiteral("NVIDIA 一键调优"), QStringLiteral("NVIDIA 电源管理建议"), QStringLiteral("NVIDIA Profile"), QStringLiteral("提示用户在控制面板中选择最高性能优先。"), QStringLiteral("start nvcplui.exe"), QStringLiteral("处理"), true, false),
+    };
+}
+
+QVector<OptimizerItem> SystemCatalog::amdItems() {
+    return {
+        item(QStringLiteral("amd-open"), QStringLiteral("AMD 一键调优"), QStringLiteral("打开 AMD Software"), QStringLiteral("amd-software:"), QStringLiteral("进入 AMD Software 调整图形性能。"), QStringLiteral("start amd-software:"), QStringLiteral("打开"), true, false),
+        item(QStringLiteral("gpu-reset"), QStringLiteral("AMD 一键调优"), QStringLiteral("恢复显卡默认设置"), QStringLiteral("显卡设置"), QStringLiteral("打开显卡面板后手动恢复默认。"), QStringLiteral("start ms-settings:display-advancedgraphics"), QStringLiteral("打开"), false, false),
+    };
+}
+
+QVector<OptimizerItem> SystemCatalog::maintenanceItems() {
+    return {
+        item(QStringLiteral("ad_block"), QStringLiteral("维护工具"), QStringLiteral("广告清理"), QStringLiteral("hosts"), QStringLiteral("写入 hosts 屏蔽广告域名并刷新 DNS。"), QStringLiteral("notepad %SystemRoot%\\System32\\drivers\\etc\\hosts"), QStringLiteral("打开"), true, false),
+        item(QStringLiteral("invalid_shortcuts"), QStringLiteral("维护工具"), QStringLiteral("无效快捷方式"), QStringLiteral("桌面/开始菜单"), QStringLiteral("扫描并处理无效 .lnk 快捷方式。"), QStringLiteral("powershell -NoProfile -Command \"Get-ChildItem $env:USERPROFILE\\Desktop -Filter *.lnk\""), QStringLiteral("扫描"), true, true),
+        item(QStringLiteral("scheduled_cleanup"), QStringLiteral("维护工具"), QStringLiteral("定时任务"), QStringLiteral("Task Scheduler"), QStringLiteral("创建、运行或删除每日清理计划。"), QStringLiteral("schtasks /query /tn C_DiskGlow_Cleanup"), QStringLiteral("检查"), true, true),
+        item(QStringLiteral("bcu"), QStringLiteral("维护工具"), QStringLiteral("BCUninstaller"), QStringLiteral("Bulk Crap Uninstaller"), QStringLiteral("查找并启动 BCUninstaller 进行高级卸载。"), QStringLiteral("start BCUninstaller.exe"), QStringLiteral("启动"), false, false),
+    };
+}
+
+QVector<OptimizerItem> SystemCatalog::edgeToolkitItems() {
+    return {
+        item(QStringLiteral("edge_install"), QStringLiteral("Edge 工具箱"), QStringLiteral("Edge 工具箱：一键静默安装 Edge"), QStringLiteral("winget"), QStringLiteral("使用 winget 安装 Microsoft Edge。"), QStringLiteral("winget install Microsoft.Edge --silent"), QStringLiteral("安装"), false, false),
+        item(QStringLiteral("edge_remove"), QStringLiteral("Edge 工具箱"), QStringLiteral("Edge 工具箱：一键彻底删除 Edge"), QStringLiteral("PowerShell"), QStringLiteral("移除 Edge Appx 包，需谨慎。"), QStringLiteral("powershell -NoProfile -Command \"Get-AppxPackage *MicrosoftEdge* | Remove-AppxPackage\""), QStringLiteral("删除"), false, false),
+        item(QStringLiteral("browser_homepage_fix"), QStringLiteral("Edge 工具箱"), QStringLiteral("一键修复浏览器主页篡改"), QStringLiteral("Registry"), QStringLiteral("清理常见 Chrome/Edge 主页策略。"), QStringLiteral("reg delete \"HKCU\\Software\\Policies\\Microsoft\\Edge\" /f"), QStringLiteral("修复"), true, false),
+    };
+}
+
+QStringList SystemCatalog::adBlockDomains() {
+    return {
+        QStringLiteral("doubleclick.net"),
+        QStringLiteral("googlesyndication.com"),
+        QStringLiteral("googleadservices.com"),
+        QStringLiteral("adnxs.com"),
+        QStringLiteral("adsystem.com"),
+        QStringLiteral("tracking-protection.cdn"),
     };
 }
 
@@ -207,6 +297,28 @@ QString SystemCatalog::runCommand(const QString& command, int* exitCode) {
     const QString error = QString::fromLocal8Bit(process.readAllStandardError());
     if (!error.isEmpty()) {
         output += QStringLiteral("\n") + error;
+    }
+    return output.trimmed().isEmpty() ? QStringLiteral("命令无输出") : output.trimmed();
+}
+
+QString SystemCatalog::runActionCommands(const QVector<WindowsOptimizationCommand>& commands, int* exitCode) {
+    QString output;
+    int lastExit = 0;
+    for (const WindowsOptimizationCommand& command : commands) {
+        QProcess process;
+        process.start(command.executable, command.arguments);
+        process.waitForFinished(-1);
+        lastExit = process.exitCode();
+        output += QStringLiteral("[%1]\n").arg(command.description);
+        output += QString::fromLocal8Bit(process.readAllStandardOutput());
+        const QString error = QString::fromLocal8Bit(process.readAllStandardError());
+        if (!error.isEmpty()) {
+            output += QStringLiteral("\n") + error;
+        }
+        output += QStringLiteral("\n");
+    }
+    if (exitCode) {
+        *exitCode = lastExit;
     }
     return output.trimmed().isEmpty() ? QStringLiteral("命令无输出") : output.trimmed();
 }

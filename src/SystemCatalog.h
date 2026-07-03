@@ -38,6 +38,23 @@ struct RepairItem {
     bool recommended = true;
 };
 
+struct WindowsOptimizationCommand {
+    QString executable;
+    QStringList arguments;
+    QString description;
+};
+
+struct WindowsOptimizationAction {
+    QString id;
+    QString title;
+    QString description;
+    QString category;
+    QString riskLabel;
+    QVector<WindowsOptimizationCommand> commands;
+    QVector<WindowsOptimizationCommand> revertCommands;
+    bool requiresAdmin = false;
+};
+
 class SystemCatalog {
 public:
     static QVector<OptimizerItem> populateStartupItems();
@@ -47,7 +64,14 @@ public:
     static QVector<OptimizerItem> populateRegistryItems();
     static QVector<BxItem> bxItems();
     static QVector<RepairItem> repairActions();
+    static QVector<WindowsOptimizationAction> windowsOptimizationActions();
+    static QVector<OptimizerItem> nvidiaItems();
+    static QVector<OptimizerItem> amdItems();
+    static QVector<OptimizerItem> maintenanceItems();
+    static QVector<OptimizerItem> edgeToolkitItems();
+    static QStringList adBlockDomains();
     static QString runCommand(const QString& command, int* exitCode = nullptr);
+    static QString runActionCommands(const QVector<WindowsOptimizationCommand>& commands, int* exitCode = nullptr);
 
 private:
     static QVector<OptimizerItem> fallbackStartupItems();
