@@ -108,6 +108,7 @@ private:
     CleanupEngine cleanupEngine_;
     FileManagementEngine fileEngine_;
     AccountStore accountStore_;
+    QString backupRoot_;
     QStackedWidget* pages_ = nullptr;
     QVector<QPushButton*> navButtons_;
 

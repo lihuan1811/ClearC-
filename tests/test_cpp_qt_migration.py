@@ -297,3 +297,34 @@ def test_file_management_engine_ports_flutter_file_tools():
         "repairFolderPermission",
     ]:
         assert token in header + source
+
+
+def test_file_migration_handles_cross_volume_and_junction_restore_safely():
+    source = read(SRC / "FileManagementEngine.cpp")
+
+    for token in [
+        "copyDirectoryContents",
+        "removeDirectoryTree",
+        "junctionTarget",
+        "removeJunction",
+        "GetFinalPathNameByHandleW",
+        "RemoveDirectoryW",
+    ]:
+        assert token in source
+
+    assert "copyOrMove({folder.path}, targetRoot, true)" not in source
+    assert "QDir(folder.path).removeRecursively();" not in source
+
+
+def test_backup_directory_selection_is_used_by_cleaning_and_manager():
+    header = read(SRC / "MainWindow.h")
+    source = read(SRC / "MainWindow.cpp")
+
+    for token in [
+        "QString backupRoot_",
+        "backupRoot_ = selected;",
+        "options.backupRoot = backupRoot_;",
+        "CleanupEngine::backupInfo(backupRoot_)",
+        "CleanupEngine::pruneBackups(backupRoot_)",
+    ]:
+        assert token in header + source

@@ -81,4 +81,8 @@ private:
     FileOperationResult copyOrMove(const QStringList& paths, const QString& targetDirectory, bool move) const;
     FileOperationResult runCommand(const QString& executable, const QStringList& arguments) const;
     MigrationFolder migrationFolderByKey(const QString& folderKey) const;
+    bool copyDirectoryContents(const QString& sourceDirectory, const QString& targetDirectory, FileOperationResult* result) const;
+    bool removeDirectoryTree(const QString& path, FileOperationResult* result) const;
+    QString junctionTarget(const QString& path) const;
+    bool removeJunction(const QString& path, FileOperationResult* result) const;
 };

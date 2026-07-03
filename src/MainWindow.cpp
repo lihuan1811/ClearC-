@@ -217,8 +217,13 @@ QWidget* MainWindow::createCleanPage() {
     controls->addWidget(backupMode_);
     auto* backupDirButton = secondaryButton(QStringLiteral("备份目录"));
     connect(backupDirButton, &QPushButton::clicked, this, [this] {
-        const QString selected = QFileDialog::getExistingDirectory(this, QStringLiteral("选择备份目录"), CleanupEngine::backupRoot());
+        const QString selected = QFileDialog::getExistingDirectory(
+            this,
+            QStringLiteral("选择备份目录"),
+            backupRoot_.isEmpty() ? CleanupEngine::backupRoot() : backupRoot_
+        );
         if (!selected.isEmpty()) {
+            backupRoot_ = selected;
             QMessageBox::information(this, QStringLiteral("备份目录"), QStringLiteral("本次清理备份目录将使用: %1").arg(selected));
         }
     });
@@ -802,6 +807,7 @@ void MainWindow::cleanSelected() {
     options.simulate = simulateMode_->isChecked();
     options.backup = backupMode_->isChecked();
     options.allowScanOnly = allowScanOnly();
+    options.backupRoot = backupRoot_;
     if (!options.simulate && !confirmDestructiveAction(
             this,
             QStringLiteral("清理选中"),
@@ -829,6 +835,7 @@ void MainWindow::cleanAllForCurrentMode() {
     options.simulate = simulateMode_->isChecked();
     options.backup = backupMode_->isChecked();
     options.allowScanOnly = allowScanOnly();
+    options.backupRoot = backupRoot_;
     const QVector<CleanupEntry> entries = cleanupEngine_.entriesForMode(cleanupEntries_, currentCleanMode());
     if (entries.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("一键清理"), QStringLiteral("请先扫描出可清理项目。"));
@@ -860,7 +867,7 @@ void MainWindow::openBackupManager() {
     layout->setContentsMargins(16, 16, 16, 16);
     layout->setSpacing(10);
 
-    BackupInfo info = CleanupEngine::backupInfo();
+    BackupInfo info = CleanupEngine::backupInfo(backupRoot_);
     auto* summary = new QLabel(QStringLiteral("备份目录: %1\n备份数量: %2 / 备份总大小: %3")
         .arg(info.backupRoot)
         .arg(info.backups.size())
@@ -934,7 +941,7 @@ void MainWindow::openBackupManager() {
         }
     });
     connect(pruneButton, &QPushButton::clicked, dialog, [this] {
-        CleanupEngine::pruneBackups();
+        CleanupEngine::pruneBackups(backupRoot_);
         QMessageBox::information(this, QStringLiteral("清理旧备份"), QStringLiteral("已按默认限制清理旧备份。"));
     });
     connect(closeButton, &QPushButton::clicked, dialog, &QDialog::accept);
