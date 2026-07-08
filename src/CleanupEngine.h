@@ -93,12 +93,22 @@ public:
         SelectAll,
     };
 
+    enum class ScanScope {
+        All,
+        CDrive,
+        QQ,
+        WeChat,
+    };
+
     using ProgressCallback = std::function<void(const QString& path, int count)>;
 
     CleanupEngine();
 
     DiskInfo diskInfo() const;
-    CleanupScanResult scanSystem(const ProgressCallback& progress = {});
+    CleanupScanResult scanSystem(
+        const ProgressCallback& progress = {},
+        ScanScope scope = ScanScope::All
+    );
     QVector<CleanupEntry> entriesForMode(
         const QVector<CleanupEntry>& entries,
         CleanMode mode
@@ -135,6 +145,7 @@ public:
 private:
     static QString envPath(const QString& name, const QString& fallback);
     static QString winJoin(std::initializer_list<QString> parts);
+    static bool ruleMatchesScanScope(const CleanupRule& rule, ScanScope scope);
     static bool pathMatches(const QString& path, const CleanupRule& rule);
     static qint64 fileSize(const QString& path);
     static QString fileDigest(const QString& path);

@@ -411,3 +411,40 @@ def test_docx_change_requests_are_reflected_in_cpp_ui():
         "storeUninstallTable_",
     ]:
         assert token in header + source
+
+
+def test_clean_page_is_split_into_scoped_modules_and_fixed_window():
+    header = read(SRC / "MainWindow.h")
+    source = read(SRC / "MainWindow.cpp")
+    cleanup_header = read(SRC / "CleanupEngine.h")
+    cleanup_source = read(SRC / "CleanupEngine.cpp")
+
+    for token in [
+        "setWindowFlag(Qt::WindowMaximizeButtonHint, false)",
+        "setFixedSize(windowSize)",
+        "QApplication::primaryScreen()",
+        "cleanSidebarButton",
+        "CleanModule::CDrive",
+        "CleanModule::QQ",
+        "CleanModule::WeChat",
+        "QQ专清",
+        "微信专清",
+        "不包含 QQ/微信专清",
+        "currentScanScope",
+        "entriesForCurrentCleanModule",
+        "cleanupEntryMatchesCurrentModule",
+        "CleanupEngine::ScanScope::QQ",
+        "CleanupEngine::ScanScope::WeChat",
+    ]:
+        assert token in header + source
+
+    for token in [
+        "enum class ScanScope",
+        "ruleMatchesScanScope",
+        "scope == ScanScope::QQ",
+        "scope == ScanScope::WeChat",
+        "scope == ScanScope::All || scope == ScanScope::CDrive",
+        "rule.id.startsWith(QStringLiteral(\"qq_\"))",
+        "rule.id.startsWith(QStringLiteral(\"wechat_\"))",
+    ]:
+        assert token in cleanup_header + cleanup_source

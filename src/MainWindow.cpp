@@ -21,7 +21,9 @@
 #include <QJsonValue>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QPair>
 #include <QProcess>
+#include <QScreen>
 #include <QSet>
 #include <QSettings>
 #include <QSplitter>
@@ -29,6 +31,7 @@
 #include <QTableWidgetItem>
 #include <QTimer>
 #include <QUrl>
+#include <QVariant>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -129,7 +132,17 @@ QString adBlockHostsCommand(bool enable) {
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
     setWindowTitle(QStringLiteral("C DiskGlow"));
-    resize(1180, 760);
+    setWindowFlag(Qt::WindowMaximizeButtonHint, false);
+    QSize windowSize(1040, 640);
+    if (QScreen* screen = QApplication::primaryScreen()) {
+        const QRect available = screen->availableGeometry();
+        windowSize = QSize(
+            qBound(960, available.width() / 2 + 80, 1120),
+            qBound(560, available.height() * 3 / 5, 680)
+        );
+        move(available.center() - QPoint(windowSize.width() / 2, windowSize.height() / 2));
+    }
+    setFixedSize(windowSize);
 
     auto* central = new QWidget(this);
     central->setObjectName(QStringLiteral("appRoot"));
@@ -152,7 +165,7 @@ MainWindow::MainWindow(QWidget* parent)
     setCentralWidget(central);
 
     applyStyle();
-    selectPage(0);
+    selectCleanModule(CleanModule::CDrive);
     refreshDiskInfo();
     populateStartupItems();
     populateMemoryItems();
@@ -184,8 +197,18 @@ QWidget* MainWindow::createSidebar() {
     layout->addWidget(title);
     layout->addSpacing(12);
 
+    const QVector<QPair<QString, CleanModule>> cleanModules = {
+        {QStringLiteral("C盘清理"), CleanModule::CDrive},
+        {QStringLiteral("QQ专清"), CleanModule::QQ},
+        {QStringLiteral("微信专清"), CleanModule::WeChat},
+    };
+    for (const auto& module : cleanModules) {
+        auto* button = cleanSidebarButton(module.first, module.second);
+        navButtons_.push_back(button);
+        layout->addWidget(button);
+    }
+
     const QStringList labels = {
-        QStringLiteral("C盘清理"),
         QStringLiteral("系统优化"),
         QStringLiteral("显卡优化"),
         QStringLiteral("BX(优化)"),
@@ -195,7 +218,8 @@ QWidget* MainWindow::createSidebar() {
         QStringLiteral("账号会员"),
     };
     for (int i = 0; i < labels.size(); ++i) {
-        auto* button = sidebarButton(labels.at(i), i);
+        const int pageIndex = i + 1;
+        auto* button = sidebarButton(labels.at(i), pageIndex);
         navButtons_.push_back(button);
         layout->addWidget(button);
     }
@@ -214,10 +238,18 @@ QWidget* MainWindow::createCleanPage() {
     auto* heroLayout = new QHBoxLayout(heroPanel);
     heroLayout->setContentsMargins(18, 16, 18, 16);
     heroLayout->setSpacing(18);
-    heroLayout->addWidget(pageHeader(
-        QStringLiteral("C DiskGlow"),
-        QStringLiteral("扫描缓存、日志、更新残留、EdgeCore、Dism++ 和 AppData 路径")
-    ), 2);
+    auto* cleanHeader = new QWidget(heroPanel);
+    auto* cleanHeaderLayout = new QVBoxLayout(cleanHeader);
+    cleanHeaderLayout->setContentsMargins(0, 0, 0, 0);
+    cleanHeaderLayout->setSpacing(5);
+    cleanTitleLabel_ = new QLabel(QStringLiteral("C盘清理"), cleanHeader);
+    cleanTitleLabel_->setObjectName(QStringLiteral("pageTitle"));
+    cleanSubtitleLabel_ = new QLabel(cleanHeader);
+    cleanSubtitleLabel_->setObjectName(QStringLiteral("pageSubtitle"));
+    cleanSubtitleLabel_->setWordWrap(true);
+    cleanHeaderLayout->addWidget(cleanTitleLabel_);
+    cleanHeaderLayout->addWidget(cleanSubtitleLabel_);
+    heroLayout->addWidget(cleanHeader, 2);
 
     auto* stats = new QHBoxLayout();
     totalSpaceLabel_ = new QLabel(QStringLiteral("总量 --"), page);
@@ -302,9 +334,9 @@ QWidget* MainWindow::createCleanPage() {
     statusStrip->setObjectName(QStringLiteral("statusStrip"));
     auto* statusLayout = new QHBoxLayout(statusStrip);
     statusLayout->setContentsMargins(14, 8, 14, 8);
-    auto* status = new QLabel(QStringLiteral("准备扫描 C 盘可清理路径"), statusStrip);
-    status->setObjectName(QStringLiteral("statusLabel"));
-    statusLayout->addWidget(status);
+    cleanStatusLabel_ = new QLabel(QStringLiteral("准备扫描 C 盘可清理路径"), statusStrip);
+    cleanStatusLabel_->setObjectName(QStringLiteral("statusLabel"));
+    statusLayout->addWidget(cleanStatusLabel_);
     layout->addWidget(statusStrip);
 
     scanWatcher_ = new QFutureWatcher<CleanupScanResult>(this);
@@ -766,18 +798,47 @@ void MainWindow::applyStyle() {
 
 void MainWindow::selectPage(int index) {
     pages_->setCurrentIndex(index);
-    for (int i = 0; i < navButtons_.size(); ++i) {
-        navButtons_[i]->setProperty("active", i == index);
-        navButtons_[i]->style()->unpolish(navButtons_[i]);
-        navButtons_[i]->style()->polish(navButtons_[i]);
+    for (QPushButton* button : navButtons_) {
+        const int pageIndex = button->property("pageIndex").toInt();
+        bool active = pageIndex == index;
+        if (active && pageIndex == 0) {
+            const QVariant module = button->property("cleanModule");
+            active = module.isValid() && module.toInt() == static_cast<int>(cleanModule_);
+        }
+        button->setProperty("active", active);
+        button->style()->unpolish(button);
+        button->style()->polish(button);
     }
+}
+
+void MainWindow::selectCleanModule(CleanModule module) {
+    if (scanWatcher_ && scanWatcher_->isRunning()) {
+        QMessageBox::information(this, QStringLiteral("清理模块"), QStringLiteral("扫描进行中，请等待完成后再切换模块。"));
+        return;
+    }
+    cleanModule_ = module;
+    updateCleanModuleHeader();
+    populateCleanupTree();
+    updateReclaimSpaceForCurrentCleanModule();
+    selectPage(0);
 }
 
 QPushButton* MainWindow::sidebarButton(const QString& text, int index) {
     auto* button = new QPushButton(text, this);
     button->setProperty("nav", true);
+    button->setProperty("pageIndex", index);
     button->setMinimumHeight(38);
     connect(button, &QPushButton::clicked, this, [this, index] { selectPage(index); });
+    return button;
+}
+
+QPushButton* MainWindow::cleanSidebarButton(const QString& text, CleanModule module) {
+    auto* button = new QPushButton(text, this);
+    button->setProperty("nav", true);
+    button->setProperty("pageIndex", 0);
+    button->setProperty("cleanModule", static_cast<int>(module));
+    button->setMinimumHeight(38);
+    connect(button, &QPushButton::clicked, this, [this, module] { selectCleanModule(module); });
     return button;
 }
 
@@ -827,16 +888,17 @@ void MainWindow::startScan() {
     if (scanWatcher_->isRunning()) {
         return;
     }
+    const CleanupEngine::ScanScope scanScope = currentScanScope();
     cleanupEntries_.clear();
     cleanupTree_->clear();
     scanProgress_->setRange(0, 0);
-    currentScanPath->setText(QStringLiteral("正在扫描 C 盘路径..."));
-    scanWatcher_->setFuture(QtConcurrent::run([this] {
+    currentScanPath->setText(QStringLiteral("正在扫描%1路径...").arg(cleanTitleLabel_ ? cleanTitleLabel_->text() : QStringLiteral("清理")));
+    scanWatcher_->setFuture(QtConcurrent::run([this, scanScope] {
         return cleanupEngine_.scanSystem([this](const QString& path, int count) {
             QMetaObject::invokeMethod(this, [this, path, count] {
                 currentScanPath->setText(QStringLiteral("正在扫描: %1 (%2)").arg(path).arg(count));
             }, Qt::QueuedConnection);
-        });
+        }, scanScope);
     }));
 }
 
@@ -845,17 +907,17 @@ void MainWindow::finishScan() {
     cleanupEntries_ = result.entries;
     scanProgress_->setRange(0, 100);
     scanProgress_->setValue(100);
-    reclaimSpaceLabel_->setText(QStringLiteral("可释放 %1").arg(CleanupEngine::formatSize(
-        currentCleanMode() == CleanupEngine::CleanMode::Recommended ? result.recommendedBytes : result.professionalBytes
-    )));
-    currentScanPath->setText(QStringLiteral("扫描完成，共 %1 项。").arg(result.entries.size()));
     populateCleanupTree();
+    updateReclaimSpaceForCurrentCleanModule();
+    currentScanPath->setText(QStringLiteral("%1扫描完成，共 %2 项。")
+        .arg(cleanTitleLabel_ ? cleanTitleLabel_->text() : QStringLiteral("清理"))
+        .arg(entriesForCurrentCleanModule(currentCleanMode()).size()));
     refreshDiskInfo();
 }
 
 void MainWindow::populateCleanupTree() {
     cleanupTree_->clear();
-    const QVector<CleanupEntry> visible = cleanupEngine_.entriesForMode(cleanupEntries_, currentCleanMode());
+    const QVector<CleanupEntry> visible = entriesForCurrentCleanModule(currentCleanMode());
     for (int i = 0; i < visible.size(); ++i) {
         const CleanupEntry& entry = visible.at(i);
         auto* row = new QTreeWidgetItem(cleanupTree_);
@@ -876,6 +938,91 @@ void MainWindow::updateModeSelection(QCheckBox* changed) {
         box->setChecked(box == changed);
     }
     populateCleanupTree();
+    updateReclaimSpaceForCurrentCleanModule();
+}
+
+void MainWindow::updateCleanModuleHeader() {
+    QString title;
+    QString subtitle;
+    QString status;
+    switch (cleanModule_) {
+    case CleanModule::QQ:
+        title = QStringLiteral("QQ专清");
+        subtitle = QStringLiteral("扫描 QQ 接收文件、聊天图片、缓存和安装包残留，独立于 C 盘主清理。");
+        status = QStringLiteral("准备扫描 QQ 专清路径");
+        break;
+    case CleanModule::WeChat:
+        title = QStringLiteral("微信专清");
+        subtitle = QStringLiteral("扫描微信文件、xwechat_files、聊天图片、视频和缓存，独立确认后清理。");
+        status = QStringLiteral("准备扫描微信专清路径");
+        break;
+    case CleanModule::CDrive:
+    default:
+        title = QStringLiteral("C盘清理");
+        subtitle = QStringLiteral("扫描缓存、日志、更新残留、EdgeCore、Dism++ 和 AppData 路径，不包含 QQ/微信专清。");
+        status = QStringLiteral("准备扫描 C 盘可清理路径");
+        break;
+    }
+    if (cleanTitleLabel_) {
+        cleanTitleLabel_->setText(title);
+    }
+    if (cleanSubtitleLabel_) {
+        cleanSubtitleLabel_->setText(subtitle);
+    }
+    if (cleanStatusLabel_) {
+        cleanStatusLabel_->setText(status);
+    }
+    if (currentScanPath) {
+        currentScanPath->setText(QStringLiteral("等待扫描。"));
+    }
+}
+
+void MainWindow::updateReclaimSpaceForCurrentCleanModule() {
+    if (!reclaimSpaceLabel_) {
+        return;
+    }
+    qint64 bytes = 0;
+    for (const CleanupEntry& entry : entriesForCurrentCleanModule(currentCleanMode())) {
+        bytes += entry.size;
+    }
+    reclaimSpaceLabel_->setText(QStringLiteral("可释放 %1").arg(CleanupEngine::formatSize(bytes)));
+}
+
+CleanupEngine::ScanScope MainWindow::currentScanScope() const {
+    switch (cleanModule_) {
+    case CleanModule::QQ:
+        return CleanupEngine::ScanScope::QQ;
+    case CleanModule::WeChat:
+        return CleanupEngine::ScanScope::WeChat;
+    case CleanModule::CDrive:
+    default:
+        return CleanupEngine::ScanScope::CDrive;
+    }
+}
+
+QVector<CleanupEntry> MainWindow::entriesForCurrentCleanModule(CleanupEngine::CleanMode mode) const {
+    QVector<CleanupEntry> filtered;
+    const QVector<CleanupEntry> modeEntries = cleanupEngine_.entriesForMode(cleanupEntries_, mode);
+    for (const CleanupEntry& entry : modeEntries) {
+        if (cleanupEntryMatchesCurrentModule(entry)) {
+            filtered.push_back(entry);
+        }
+    }
+    return filtered;
+}
+
+bool MainWindow::cleanupEntryMatchesCurrentModule(const CleanupEntry& entry) const {
+    const bool qqEntry = entry.ruleId.startsWith(QStringLiteral("qq_"));
+    const bool wechatEntry = entry.ruleId.startsWith(QStringLiteral("wechat_"));
+    switch (cleanModule_) {
+    case CleanModule::QQ:
+        return qqEntry;
+    case CleanModule::WeChat:
+        return wechatEntry;
+    case CleanModule::CDrive:
+    default:
+        return !qqEntry && !wechatEntry;
+    }
 }
 
 CleanupEngine::CleanMode MainWindow::currentCleanMode() const {
@@ -889,7 +1036,7 @@ CleanupEngine::CleanMode MainWindow::currentCleanMode() const {
 }
 
 QVector<CleanupEntry> MainWindow::selectedCleanupEntries() const {
-    QVector<CleanupEntry> modeEntries = cleanupEngine_.entriesForMode(cleanupEntries_, currentCleanMode());
+    QVector<CleanupEntry> modeEntries = entriesForCurrentCleanModule(currentCleanMode());
     QVector<CleanupEntry> selected;
     for (int i = 0; i < cleanupTree_->topLevelItemCount(); ++i) {
         QTreeWidgetItem* item = cleanupTree_->topLevelItem(i);
@@ -955,7 +1102,7 @@ void MainWindow::cleanAllForCurrentMode() {
     options.backup = backupMode_->isChecked();
     options.allowScanOnly = allowScanOnly();
     options.backupRoot = backupRoot_;
-    const QVector<CleanupEntry> entries = cleanupEngine_.entriesForMode(cleanupEntries_, currentCleanMode());
+    const QVector<CleanupEntry> entries = entriesForCurrentCleanModule(currentCleanMode());
     if (entries.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("一键清理"), QStringLiteral("请先扫描出可清理项目。"));
         return;

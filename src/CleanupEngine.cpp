@@ -105,11 +105,29 @@ DiskInfo CleanupEngine::diskInfo() const {
     return info;
 }
 
-CleanupScanResult CleanupEngine::scanSystem(const ProgressCallback& progress) {
+bool CleanupEngine::ruleMatchesScanScope(const CleanupRule& rule, ScanScope scope) {
+    if (scope == ScanScope::All) {
+        return true;
+    }
+    const bool qqRule = rule.id.startsWith(QStringLiteral("qq_"));
+    const bool wechatRule = rule.id.startsWith(QStringLiteral("wechat_"));
+    if (scope == ScanScope::QQ) {
+        return qqRule;
+    }
+    if (scope == ScanScope::WeChat) {
+        return wechatRule;
+    }
+    return !qqRule && !wechatRule;
+}
+
+CleanupScanResult CleanupEngine::scanSystem(const ProgressCallback& progress, ScanScope scope) {
     CleanupScanResult result;
     int count = 0;
 
     for (const CleanupRule& rule : cleanupRules()) {
+        if (!ruleMatchesScanScope(rule, scope)) {
+            continue;
+        }
         for (const QString& rootPath : rule.paths) {
             if (progress) {
                 progress(rootPath, count);
@@ -143,20 +161,22 @@ CleanupScanResult CleanupEngine::scanSystem(const ProgressCallback& progress) {
         }
     }
 
-    for (const DismRuleEntry& dismEntry : DismRuleScanner().scan()) {
-        CleanupEntry entry;
-        entry.ruleId = QStringLiteral("dismpp_rules");
-        entry.title = QStringLiteral("Dism++规则 - %1").arg(dismEntry.ruleName);
-        entry.path = dismEntry.path;
-        entry.files = {dismEntry.path};
-        entry.size = dismEntry.size;
-        entry.scanOnly = false;
-        entry.recommended = false;
-        entry.professional = true;
-        result.entries.push_back(entry);
-        result.totalBytes += entry.size;
-        result.professionalBytes += entry.size;
-        ++count;
+    if (scope == ScanScope::All || scope == ScanScope::CDrive) {
+        for (const DismRuleEntry& dismEntry : DismRuleScanner().scan()) {
+            CleanupEntry entry;
+            entry.ruleId = QStringLiteral("dismpp_rules");
+            entry.title = QStringLiteral("Dism++规则 - %1").arg(dismEntry.ruleName);
+            entry.path = dismEntry.path;
+            entry.files = {dismEntry.path};
+            entry.size = dismEntry.size;
+            entry.scanOnly = false;
+            entry.recommended = false;
+            entry.professional = true;
+            result.entries.push_back(entry);
+            result.totalBytes += entry.size;
+            result.professionalBytes += entry.size;
+            ++count;
+        }
     }
 
     result.scannedCount = count;

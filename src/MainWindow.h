@@ -26,6 +26,12 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
 
 private:
+    enum class CleanModule {
+        CDrive = 0,
+        QQ = 1,
+        WeChat = 2,
+    };
+
     QWidget* createSidebar();
     QWidget* createCleanPage();
     QWidget* createOptimizePage();
@@ -38,7 +44,9 @@ private:
 
     void applyStyle();
     void selectPage(int index);
+    void selectCleanModule(CleanModule module);
     QPushButton* sidebarButton(const QString& text, int index);
+    QPushButton* cleanSidebarButton(const QString& text, CleanModule module);
     QPushButton* primaryButton(const QString& text) const;
     QPushButton* secondaryButton(const QString& text) const;
     void refreshDiskInfo();
@@ -48,6 +56,11 @@ private:
     void startScan();
     void finishScan();
     void populateCleanupTree();
+    void updateCleanModuleHeader();
+    void updateReclaimSpaceForCurrentCleanModule();
+    CleanupEngine::ScanScope currentScanScope() const;
+    QVector<CleanupEntry> entriesForCurrentCleanModule(CleanupEngine::CleanMode mode) const;
+    bool cleanupEntryMatchesCurrentModule(const CleanupEntry& entry) const;
     void updateModeSelection(QCheckBox* changed);
     CleanupEngine::CleanMode currentCleanMode() const;
     QVector<CleanupEntry> selectedCleanupEntries() const;
@@ -118,6 +131,7 @@ private:
     GpuOptimizationEngine gpuEngine_;
     AccountStore accountStore_;
     QString backupRoot_;
+    CleanModule cleanModule_ = CleanModule::CDrive;
     QStackedWidget* pages_ = nullptr;
     QVector<QPushButton*> navButtons_;
 
@@ -125,6 +139,9 @@ private:
     QLabel* usedSpaceLabel_ = nullptr;
     QLabel* freeSpaceLabel_ = nullptr;
     QLabel* reclaimSpaceLabel_ = nullptr;
+    QLabel* cleanTitleLabel_ = nullptr;
+    QLabel* cleanSubtitleLabel_ = nullptr;
+    QLabel* cleanStatusLabel_ = nullptr;
     QLabel* currentScanPath = nullptr;
     QProgressBar* scanProgress_ = nullptr;
     QTreeWidget* cleanupTree_ = nullptr;
