@@ -8,6 +8,8 @@
 
 #include <QCheckBox>
 #include <QFutureWatcher>
+#include <QGraphicsScene>
+#include <QGraphicsView>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
@@ -109,6 +111,7 @@ private:
     void populateLargeFiles(const QVector<FileEntry>& files);
     void populateDuplicateFiles(const QVector<QVector<FileEntry>>& groups);
     void populateFolderUsage(const QVector<FolderUsageEntry>& entries);
+    void populateFolderUsageTreemap(const QVector<FolderUsageEntry>& entries);
     void populateEmptyFolders(const QVector<EmptyFolderEntry>& folders);
     void populateMigrationFolders(const QVector<MigrationFolder>& folders);
     void deleteSelectedFileItems();
@@ -171,7 +174,10 @@ private:
     QTabWidget* fileTabs_ = nullptr;
     QString fileRoot_;
     QLabel* fileRootLabel_ = nullptr;
+    QWidget* folderUsagePage_ = nullptr;
     QTreeWidget* folderUsageTree_ = nullptr;
+    QGraphicsScene* folderUsageMapScene_ = nullptr;
+    QGraphicsView* folderUsageMapView_ = nullptr;
     QTableWidget* largeFileTable_ = nullptr;
     QTableWidget* duplicateFileTable_ = nullptr;
     QTableWidget* emptyFolderTable_ = nullptr;

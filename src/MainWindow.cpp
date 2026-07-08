@@ -4,6 +4,7 @@
 
 #include <QApplication>
 #include <QBrush>
+#include <QColor>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
@@ -11,7 +12,11 @@
 #include <QDialog>
 #include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFrame>
+#include <QGraphicsScene>
+#include <QGraphicsTextItem>
+#include <QGraphicsView>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -22,6 +27,8 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPair>
+#include <QPainter>
+#include <QPen>
 #include <QProcess>
 #include <QScreen>
 #include <QSet>
@@ -127,6 +134,83 @@ QString adBlockHostsCommand(bool enable) {
         .arg(domainArray);
 }
 
+QString usageTreemapLabel(const FolderUsageEntry& entry) {
+    const QFileInfo info(entry.path);
+    const QString name = info.fileName().isEmpty() ? QDir::toNativeSeparators(entry.path) : info.fileName();
+    return QStringLiteral("%1\n%2").arg(name, CleanupEngine::formatSize(entry.sizeBytes));
+}
+
+QColor usageTreemapColor(int index) {
+    static const QVector<QColor> palette = {
+        QColor(QStringLiteral("#10b981")),
+        QColor(QStringLiteral("#0ea5e9")),
+        QColor(QStringLiteral("#f59e0b")),
+        QColor(QStringLiteral("#8b5cf6")),
+        QColor(QStringLiteral("#ef4444")),
+        QColor(QStringLiteral("#14b8a6")),
+        QColor(QStringLiteral("#64748b")),
+        QColor(QStringLiteral("#22c55e")),
+    };
+    return palette.at(index % palette.size());
+}
+
+qint64 usageTreemapTotal(const QVector<FolderUsageEntry>& entries, int first, int last) {
+    qint64 total = 0;
+    for (int i = first; i <= last; ++i) {
+        total += qMax<qint64>(1, entries.at(i).sizeBytes);
+    }
+    return total;
+}
+
+void drawUsageTreemap(QGraphicsScene* scene, const QVector<FolderUsageEntry>& entries, int first, int last, const QRectF& rect, int* colorIndex) {
+    if (!scene || first > last || rect.width() <= 1 || rect.height() <= 1) {
+        return;
+    }
+
+    if (first == last || rect.width() < 70 || rect.height() < 42) {
+        const FolderUsageEntry& entry = entries.at(first);
+        const QRectF cell = rect.adjusted(1, 1, -1, -1);
+        const QColor color = usageTreemapColor((*colorIndex)++);
+        auto* item = scene->addRect(cell, QPen(QColor(QStringLiteral("#ffffff")), 1), QBrush(color));
+        item->setToolTip(QStringLiteral("%1\n%2\n文件数: %3")
+            .arg(QDir::toNativeSeparators(entry.path), CleanupEngine::formatSize(entry.sizeBytes))
+            .arg(entry.fileCount));
+        if (cell.width() >= 92 && cell.height() >= 38) {
+            auto* text = scene->addText(usageTreemapLabel(entry));
+            text->setDefaultTextColor(Qt::white);
+            text->setTextWidth(cell.width() - 8);
+            text->setPos(cell.left() + 4, cell.top() + 4);
+        }
+        return;
+    }
+
+    const qint64 total = usageTreemapTotal(entries, first, last);
+    qint64 leftTotal = 0;
+    int split = first;
+    while (split < last) {
+        const qint64 next = leftTotal + qMax<qint64>(1, entries.at(split).sizeBytes);
+        if (next >= total / 2 && split > first) {
+            break;
+        }
+        leftTotal = next;
+        ++split;
+    }
+    if (split >= last) {
+        split = first;
+        leftTotal = qMax<qint64>(1, entries.at(first).sizeBytes);
+    }
+
+    if (rect.width() >= rect.height()) {
+        const qreal leftWidth = qMax<qreal>(24.0, rect.width() * static_cast<qreal>(leftTotal) / static_cast<qreal>(total));
+        drawUsageTreemap(scene, entries, first, split, QRectF(rect.left(), rect.top(), leftWidth, rect.height()), colorIndex);
+        drawUsageTreemap(scene, entries, split + 1, last, QRectF(rect.left() + leftWidth, rect.top(), rect.width() - leftWidth, rect.height()), colorIndex);
+    } else {
+        const qreal topHeight = qMax<qreal>(24.0, rect.height() * static_cast<qreal>(leftTotal) / static_cast<qreal>(total));
+        drawUsageTreemap(scene, entries, first, split, QRectF(rect.left(), rect.top(), rect.width(), topHeight), colorIndex);
+        drawUsageTreemap(scene, entries, split + 1, last, QRectF(rect.left(), rect.top() + topHeight, rect.width(), rect.height() - topHeight), colorIndex);
+    }
+}
+
 }  // namespace
 
 MainWindow::MainWindow(QWidget* parent)
@@ -156,7 +240,6 @@ MainWindow::MainWindow(QWidget* parent)
     pages_->addWidget(createCleanPage());
     pages_->addWidget(createOptimizePage());
     pages_->addWidget(createGpuPage());
-    pages_->addWidget(createBxPage());
     pages_->addWidget(createUninstallPage());
     pages_->addWidget(createFilePage());
     pages_->addWidget(createRepairPage());
@@ -211,7 +294,6 @@ QWidget* MainWindow::createSidebar() {
     const QStringList labels = {
         QStringLiteral("系统优化"),
         QStringLiteral("显卡优化"),
-        QStringLiteral("BX(优化)"),
         QStringLiteral("软件卸载"),
         QStringLiteral("文件管理"),
         QStringLiteral("系统修复"),
@@ -351,7 +433,7 @@ QWidget* MainWindow::createOptimizePage() {
 
     layout->addWidget(pageHeader(
         QStringLiteral("系统优化"),
-        QStringLiteral("开机启动、运行内存、Windows 设置优化、广告清理、显卡调优、Edge 工具箱和定时任务集中处理。")
+        QStringLiteral("开机启动、运行内存、系统优化(含 BX 一键优化)、隐私清理、显卡调优、Edge 工具箱和定时任务集中处理。")
     ));
 
     optimizerTabs_ = new QTabWidget(page);
@@ -368,6 +450,10 @@ QWidget* MainWindow::createOptimizePage() {
         QStringLiteral("Edge 工具箱"),
     };
     for (const QString& tab : tabs) {
+        if (tab == QStringLiteral("系统优化")) {
+            optimizerTabs_->addTab(createBxPage(), tab);
+            continue;
+        }
         if (tab == QStringLiteral("Windows 设置优化")) {
             windowsOptimizationTable_ = new QTableWidget(page);
             windowsOptimizationTable_->setColumnCount(7);
@@ -585,7 +671,11 @@ QWidget* MainWindow::createFilePage() {
     layout->addWidget(featureCard);
 
     fileTabs_ = new QTabWidget(page);
-    folderUsageTree_ = new QTreeWidget(page);
+    folderUsagePage_ = new QWidget(page);
+    auto* folderUsageLayout = new QVBoxLayout(folderUsagePage_);
+    folderUsageLayout->setContentsMargins(0, 0, 0, 0);
+    folderUsageLayout->setSpacing(8);
+    folderUsageTree_ = new QTreeWidget(folderUsagePage_);
     folderUsageTree_->setObjectName(QStringLiteral("folderUsageTree"));
     folderUsageTree_->setColumnCount(4);
     folderUsageTree_->setHeaderLabels({QStringLiteral("文件夹"), QStringLiteral("占用大小"), QStringLiteral("文件数"), QStringLiteral("占比")});
@@ -593,6 +683,26 @@ QWidget* MainWindow::createFilePage() {
     folderUsageTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     folderUsageTree_->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     folderUsageTree_->header()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    folderUsageLayout->addWidget(folderUsageTree_, 2);
+
+    auto* usageMapCard = new QFrame(folderUsagePage_);
+    usageMapCard->setObjectName(QStringLiteral("featureCard"));
+    auto* usageMapLayout = new QVBoxLayout(usageMapCard);
+    usageMapLayout->setContentsMargins(12, 10, 12, 12);
+    usageMapLayout->setSpacing(8);
+    auto* usageMapTitle = new QLabel(QStringLiteral("文件大小方格可视化"), usageMapCard);
+    usageMapTitle->setObjectName(QStringLiteral("sectionTitle"));
+    usageMapLayout->addWidget(usageMapTitle);
+    folderUsageMapScene_ = new QGraphicsScene(usageMapCard);
+    folderUsageMapView_ = new QGraphicsView(folderUsageMapScene_, usageMapCard);
+    folderUsageMapView_->setObjectName(QStringLiteral("folderUsageTreemap"));
+    folderUsageMapView_->setMinimumHeight(210);
+    folderUsageMapView_->setRenderHint(QPainter::Antialiasing, true);
+    folderUsageMapView_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    folderUsageMapView_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    folderUsageMapView_->setFrameShape(QFrame::NoFrame);
+    usageMapLayout->addWidget(folderUsageMapView_, 1);
+    folderUsageLayout->addWidget(usageMapCard, 1);
 
     largeFileTable_ = new QTableWidget(page);
     largeFileTable_->setColumnCount(3);
@@ -681,7 +791,7 @@ QWidget* MainWindow::createFilePage() {
     rulesStoreLayout->addWidget(openRules, 0, Qt::AlignLeft);
     rulesStoreLayout->addStretch();
 
-    fileTabs_->addTab(folderUsageTree_, QStringLiteral("文件夹占用"));
+    fileTabs_->addTab(folderUsagePage_, QStringLiteral("文件夹占用"));
     fileTabs_->addTab(largeFileTable_, QStringLiteral("大文件"));
     fileTabs_->addTab(duplicateFileTable_, QStringLiteral("重复文件"));
     fileTabs_->addTab(emptyFolderTable_, QStringLiteral("空文件夹"));
@@ -789,6 +899,11 @@ void MainWindow::applyStyle() {
             border: 1px solid #d1d5db;
             border-radius: 6px;
             padding: 4px;
+        }
+        QGraphicsView#folderUsageTreemap {
+            background: #f8fafc;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
         }
         QTabWidget::pane { border: 1px solid #d1d5db; background: white; border-radius: 6px; }
         QTabBar::tab { padding: 8px 12px; margin-right: 2px; }
@@ -1297,6 +1412,10 @@ void MainWindow::applyCurrentOptimizationTab() {
     const QString tab = optimizerTabs_->tabText(optimizerTabs_->currentIndex());
     QTreeWidget* table = optimizerTables_.value(tab);
     if (!table) {
+        if (tab == QStringLiteral("系统优化") && bxTable_) {
+            applyBxOptimization();
+            return;
+        }
         if (optimizerTabs_->currentWidget() == windowsOptimizationTable_) {
             QMessageBox::information(this, QStringLiteral("Windows 设置优化"), QStringLiteral("请使用每行的执行/恢复按钮，避免一次性应用高风险设置。"));
         }
@@ -1690,7 +1809,7 @@ void MainWindow::chooseFileRoot() {
 
 void MainWindow::scanFolderUsage() {
     const QString root = fileRoot_.isEmpty() ? cDriveRoot() : fileRoot_;
-    fileTabs_->setCurrentWidget(folderUsageTree_);
+    fileTabs_->setCurrentWidget(folderUsagePage_);
     fileStatusLabel_->setText(QStringLiteral("正在扫描文件夹占用: %1").arg(QDir::toNativeSeparators(root)));
     auto* watcher = new QFutureWatcher<QVector<FolderUsageEntry>>(this);
     connect(watcher, &QFutureWatcher<QVector<FolderUsageEntry>>::finished, this, [this, watcher] {
@@ -1889,7 +2008,38 @@ void MainWindow::populateFolderUsage(const QVector<FolderUsageEntry>& entries) {
         row->setText(3, total > 0 ? QStringLiteral("%1%").arg(entry.sizeBytes * 100.0 / total, 0, 'f', 1) : QStringLiteral("--"));
         row->setData(0, Qt::UserRole, entry.path);
     }
+    populateFolderUsageTreemap(entries);
     fileStatusLabel_->setText(QStringLiteral("文件夹占用扫描完成: %1 项").arg(entries.size()));
+}
+
+void MainWindow::populateFolderUsageTreemap(const QVector<FolderUsageEntry>& entries) {
+    if (!folderUsageMapScene_ || !folderUsageMapView_) {
+        return;
+    }
+    folderUsageMapScene_->clear();
+    folderUsageMapScene_->setSceneRect(0, 0, 1100, 260);
+
+    QVector<FolderUsageEntry> visible;
+    for (const FolderUsageEntry& entry : entries) {
+        if (entry.sizeBytes > 0) {
+            visible.push_back(entry);
+        }
+    }
+    std::sort(visible.begin(), visible.end(), [](const FolderUsageEntry& a, const FolderUsageEntry& b) {
+        return a.sizeBytes > b.sizeBytes;
+    });
+
+    if (visible.isEmpty()) {
+        auto* text = folderUsageMapScene_->addText(QStringLiteral("扫描完成后，这里会按大小显示文件夹占用方格图。"));
+        text->setDefaultTextColor(QColor(QStringLiteral("#64748b")));
+        text->setPos(12, 18);
+        folderUsageMapView_->fitInView(folderUsageMapScene_->sceneRect(), Qt::KeepAspectRatio);
+        return;
+    }
+
+    int colorIndex = 0;
+    drawUsageTreemap(folderUsageMapScene_, visible, 0, visible.size() - 1, folderUsageMapScene_->sceneRect(), &colorIndex);
+    folderUsageMapView_->fitInView(folderUsageMapScene_->sceneRect(), Qt::KeepAspectRatio);
 }
 
 void MainWindow::populateEmptyFolders(const QVector<EmptyFolderEntry>& folders) {

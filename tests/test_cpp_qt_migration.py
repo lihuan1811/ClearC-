@@ -448,3 +448,34 @@ def test_clean_page_is_split_into_scoped_modules_and_fixed_window():
         "rule.id.startsWith(QStringLiteral(\"wechat_\"))",
     ]:
         assert token in cleanup_header + cleanup_source
+
+
+def test_bx_matches_python_qt_location_and_file_usage_has_treemap():
+    header = read(SRC / "MainWindow.h")
+    source = read(SRC / "MainWindow.cpp")
+    sidebar = source.split("QWidget* MainWindow::createSidebar", 1)[1].split("QWidget* MainWindow::createCleanPage", 1)[0]
+    optimize_page = source.split("QWidget* MainWindow::createOptimizePage", 1)[1].split("QWidget* MainWindow::createGpuPage", 1)[0]
+
+    assert "BX(优化)" not in sidebar
+    for token in [
+        "tab == QStringLiteral(\"系统优化\")",
+        "optimizerTabs_->addTab(createBxPage(), tab)",
+        "tab == QStringLiteral(\"系统优化\") && bxTable_",
+        "populateBxItems",
+        "applyBxOptimization",
+    ]:
+        assert token in optimize_page + source
+
+    for token in [
+        "folderUsagePage_",
+        "folderUsageMapScene_",
+        "folderUsageMapView_",
+        "QGraphicsScene",
+        "QGraphicsView#folderUsageTreemap",
+        "文件大小方格可视化",
+        "drawUsageTreemap",
+        "populateFolderUsageTreemap(entries)",
+        "fileTabs_->addTab(folderUsagePage_, QStringLiteral(\"文件夹占用\"))",
+        "fileTabs_->setCurrentWidget(folderUsagePage_)",
+    ]:
+        assert token in header + source
