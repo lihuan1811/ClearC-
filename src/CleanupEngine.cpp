@@ -131,6 +131,7 @@ CleanupScanResult CleanupEngine::scanSystem(const ProgressCallback& progress) {
             entry.scanOnly = rule.scanOnly;
             entry.recommended = rule.recommended;
             entry.professional = rule.professional;
+            entry.privacySensitive = rule.privacySensitive;
             result.entries.push_back(entry);
             result.totalBytes += totalSize;
             if (!rule.scanOnly && rule.recommended) {
@@ -181,7 +182,9 @@ QVector<CleanupEntry> CleanupEngine::entriesForMode(
             continue;
         }
         if (mode == CleanMode::SelectAll) {
-            selected.push_back(entry);
+            if (!entry.privacySensitive) {
+                selected.push_back(entry);
+            }
         }
     }
     return selected;
@@ -276,7 +279,8 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
         const QStringList& patterns = {},
         const QStringList& pathContains = {},
         bool recommended = true,
-        bool professional = true
+        bool professional = true,
+        bool privacySensitive = false
     ) {
         CleanupRule rule;
         rule.id = id;
@@ -287,6 +291,7 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
         rule.scanOnly = scanOnly;
         rule.recommended = recommended;
         rule.professional = professional;
+        rule.privacySensitive = privacySensitive;
         rules.push_back(rule);
     };
 
@@ -310,17 +315,22 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
         {winJoin({localAppData, QStringLiteral("Google"), QStringLiteral("Chrome"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Network"), QStringLiteral("Cookies")}),
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Network"), QStringLiteral("Cookies")}),
          winJoin({appData, QStringLiteral("Mozilla"), QStringLiteral("Firefox"), QStringLiteral("Profiles")})},
-        true, {QStringLiteral("Cookies"), QStringLiteral("cookies.sqlite")}, {}, false, true);
+        true, {QStringLiteral("Cookies"), QStringLiteral("cookies.sqlite")}, {}, false, true, true);
     add(QStringLiteral("browser_history"), QStringLiteral("浏览器历史记录"),
         {winJoin({localAppData, QStringLiteral("Google"), QStringLiteral("Chrome"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("History")}),
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("History")}),
          winJoin({appData, QStringLiteral("Mozilla"), QStringLiteral("Firefox"), QStringLiteral("Profiles")})},
-        true, {QStringLiteral("History"), QStringLiteral("places.sqlite")}, {}, false, true);
+        true, {QStringLiteral("History"), QStringLiteral("places.sqlite")}, {}, false, true, true);
     add(QStringLiteral("browser_passwords"), QStringLiteral("浏览器保存密码"),
         {winJoin({localAppData, QStringLiteral("Google"), QStringLiteral("Chrome"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Login Data")}),
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Login Data")}),
          winJoin({appData, QStringLiteral("Mozilla"), QStringLiteral("Firefox"), QStringLiteral("Profiles")})},
-        true, {QStringLiteral("Login Data"), QStringLiteral("logins.json"), QStringLiteral("key4.db")}, {}, false, true);
+        true, {QStringLiteral("Login Data"), QStringLiteral("logins.json"), QStringLiteral("key4.db")}, {}, false, true, true);
+    add(QStringLiteral("browser_extensions"), QStringLiteral("浏览器插件与扩展数据"),
+        {winJoin({localAppData, QStringLiteral("Google"), QStringLiteral("Chrome"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Extensions")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Extensions")}),
+         winJoin({appData, QStringLiteral("Mozilla"), QStringLiteral("Firefox"), QStringLiteral("Profiles")})},
+        true, {QStringLiteral("extensions.json"), QStringLiteral("addons.json"), QStringLiteral("*.xpi")}, {}, false, true, true);
     add(QStringLiteral("chrome_update_cache"), QStringLiteral("Chrome 更新缓存"),
         {winJoin({localAppData, QStringLiteral("Google"), QStringLiteral("Update")})}, false);
     add(QStringLiteral("edge_update_cache"), QStringLiteral("Edge 更新缓存"),
@@ -349,7 +359,7 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Preferences")}),
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Sessions")}),
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Session Storage")})},
-        true);
+        true, {}, {}, false, true, true);
     add(QStringLiteral("edge_component_updates"), QStringLiteral("Edge 组件更新残留"),
         {winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("EADPData Component")}),
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Typosquatting")})},

@@ -15,7 +15,10 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonValue>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QProcess>
@@ -45,6 +48,33 @@ QString cDriveRoot() {
 #else
     return QDir::homePath();
 #endif
+}
+
+QString defaultMigrationTargetRoot() {
+#ifdef Q_OS_WIN
+    const QString systemDrive = qEnvironmentVariable("SystemDrive", "C:").toUpper();
+    for (const QFileInfo& drive : QDir::drives()) {
+        const QString path = QDir::toNativeSeparators(drive.absoluteFilePath());
+        const QString letter = path.left(2).toUpper();
+        if (!letter.isEmpty() && letter != systemDrive) {
+            return QDir(path).filePath(QStringLiteral("C_DiskGlow_Moved"));
+        }
+    }
+    return {};
+#else
+    return QDir::home().filePath(QStringLiteral("C_DiskGlow_Moved"));
+#endif
+}
+
+bool defaultMigrationKey(const QString& key) {
+    static const QSet<QString> keys = {
+        QStringLiteral("documents"),
+        QStringLiteral("downloads"),
+        QStringLiteral("pictures"),
+        QStringLiteral("videos"),
+        QStringLiteral("music"),
+    };
+    return keys.contains(key);
 }
 
 void setTableStretch(QTableWidget* table) {
@@ -112,6 +142,7 @@ MainWindow::MainWindow(QWidget* parent)
     pages_->setObjectName(QStringLiteral("contentArea"));
     pages_->addWidget(createCleanPage());
     pages_->addWidget(createOptimizePage());
+    pages_->addWidget(createGpuPage());
     pages_->addWidget(createBxPage());
     pages_->addWidget(createUninstallPage());
     pages_->addWidget(createFilePage());
@@ -133,6 +164,7 @@ MainWindow::MainWindow(QWidget* parent)
     populateMaintenanceItems();
     populateEdgeToolkitItems();
     populateWindowsOptimizationActions();
+    refreshGpuInfo();
     populateBxItems();
     refreshInstalledApps();
     populateRepairTable();
@@ -155,6 +187,7 @@ QWidget* MainWindow::createSidebar() {
     const QStringList labels = {
         QStringLiteral("C盘清理"),
         QStringLiteral("系统优化"),
+        QStringLiteral("显卡优化"),
         QStringLiteral("BX(优化)"),
         QStringLiteral("软件卸载"),
         QStringLiteral("文件管理"),
@@ -346,6 +379,61 @@ QWidget* MainWindow::createOptimizePage() {
     return page;
 }
 
+QWidget* MainWindow::createGpuPage() {
+    auto* page = new QWidget(this);
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(20, 18, 20, 18);
+    layout->setSpacing(12);
+
+    layout->addWidget(pageHeader(
+        QStringLiteral("显卡优化"),
+        QStringLiteral("自动识别 NVIDIA / AMD / Intel，显示驱动、显存、温度、负载；只显示当前机器支持的操作，每个修改都带确认、日志和还原。")
+    ));
+
+    auto* refreshRow = new QHBoxLayout();
+    auto* refreshButton = primaryButton(QStringLiteral("刷新显卡检测"));
+    connect(refreshButton, &QPushButton::clicked, this, &MainWindow::refreshGpuInfo);
+    refreshRow->addStretch();
+    refreshRow->addWidget(refreshButton);
+    layout->addLayout(refreshRow);
+
+    gpuInfoTable_ = new QTableWidget(page);
+    gpuInfoTable_->setColumnCount(7);
+    gpuInfoTable_->setHorizontalHeaderLabels({
+        QStringLiteral("厂商"),
+        QStringLiteral("显卡"),
+        QStringLiteral("驱动"),
+        QStringLiteral("显存"),
+        QStringLiteral("温度"),
+        QStringLiteral("负载"),
+        QStringLiteral("支持项"),
+    });
+    setTableStretch(gpuInfoTable_);
+    layout->addWidget(gpuInfoTable_, 1);
+
+    gpuActionTable_ = new QTableWidget(page);
+    gpuActionTable_->setColumnCount(6);
+    gpuActionTable_->setHorizontalHeaderLabels({
+        QStringLiteral("厂商"),
+        QStringLiteral("操作"),
+        QStringLiteral("风险"),
+        QStringLiteral("说明"),
+        QStringLiteral("执行"),
+        QStringLiteral("还原"),
+    });
+    setTableStretch(gpuActionTable_);
+    layout->addWidget(gpuActionTable_, 1);
+
+    gpuLog_ = new QTextEdit(page);
+    gpuLog_->setObjectName(QStringLiteral("operationLog"));
+    gpuLog_->setReadOnly(true);
+    gpuLog_->setPlaceholderText(QStringLiteral("显卡优化日志"));
+    gpuLog_->setMaximumHeight(120);
+    layout->addWidget(gpuLog_);
+
+    return page;
+}
+
 QWidget* MainWindow::createBxPage() {
     auto* page = new QWidget(this);
     auto* layout = new QVBoxLayout(page);
@@ -391,11 +479,24 @@ QWidget* MainWindow::createUninstallPage() {
     connect(refresh, &QPushButton::clicked, this, &MainWindow::refreshInstalledApps);
     layout->addWidget(refresh, 0, Qt::AlignLeft);
 
+    uninstallTabs_ = new QTabWidget(page);
     uninstallTable_ = new QTableWidget(page);
-    uninstallTable_->setColumnCount(5);
-    uninstallTable_->setHorizontalHeaderLabels({QStringLiteral("软件"), QStringLiteral("发布者"), QStringLiteral("版本"), QStringLiteral("卸载命令"), QStringLiteral("操作")});
-    setTableStretch(uninstallTable_);
-    layout->addWidget(uninstallTable_, 1);
+    storeUninstallTable_ = new QTableWidget(page);
+    for (QTableWidget* table : {uninstallTable_, storeUninstallTable_}) {
+        table->setColumnCount(5);
+        table->setHorizontalHeaderLabels({
+            QStringLiteral("软件"),
+            QStringLiteral("发布者/包名"),
+            QStringLiteral("版本"),
+            QStringLiteral("卸载命令"),
+            QStringLiteral("操作"),
+        });
+        setTableStretch(table);
+    }
+    uninstallTabs_->addTab(uninstallTable_, QStringLiteral("用户安装程序"));
+    uninstallTabs_->addTab(storeUninstallTable_, QStringLiteral("微软商店应用"));
+    uninstallTabs_->setCurrentWidget(uninstallTable_);
+    layout->addWidget(uninstallTabs_, 1);
     return page;
 }
 
@@ -485,18 +586,32 @@ QWidget* MainWindow::createFilePage() {
     migrationLayout->addWidget(migrationTitle);
     auto* migrationControls = new QHBoxLayout();
     migrationTargetEdit_ = new QLineEdit(migrationPage);
-    migrationTargetEdit_->setPlaceholderText(QStringLiteral("目标根目录，例如 D:\\C_DiskGlow_Moved"));
-    migrationTargetEdit_->setText(QStringLiteral("D:\\C_DiskGlow_Moved"));
+    migrationTargetEdit_->setPlaceholderText(QStringLiteral("目标根目录，请选择非系统盘，例如 D:\\C_DiskGlow_Moved"));
+    migrationTargetEdit_->setText(defaultMigrationTargetRoot());
     migrationMoveFiles_ = new QCheckBox(QStringLiteral("迁移时移动原文件"), migrationPage);
     migrationMoveFiles_->setChecked(true);
+    auto* browseMigration = secondaryButton(QStringLiteral("选择目标"));
     auto* refreshMigration = secondaryButton(QStringLiteral("刷新迁移状态"));
     auto* migrate = primaryButton(QStringLiteral("开始迁移"));
     auto* restore = secondaryButton(QStringLiteral("还原选中"));
+    connect(browseMigration, &QPushButton::clicked, this, [this] {
+        const QString selected = QFileDialog::getExistingDirectory(
+            this,
+            QStringLiteral("选择迁移目标根目录"),
+            migrationTargetEdit_ && !migrationTargetEdit_->text().trimmed().isEmpty()
+                ? migrationTargetEdit_->text().trimmed()
+                : defaultMigrationTargetRoot()
+        );
+        if (!selected.isEmpty() && migrationTargetEdit_) {
+            migrationTargetEdit_->setText(QDir::toNativeSeparators(selected));
+        }
+    });
     connect(refreshMigration, &QPushButton::clicked, this, &MainWindow::refreshMigrationFolders);
     connect(migrate, &QPushButton::clicked, this, &MainWindow::migrateSelectedFolders);
     connect(restore, &QPushButton::clicked, this, &MainWindow::restoreSelectedFolders);
     migrationControls->addWidget(migrationTargetEdit_, 1);
     migrationControls->addWidget(migrationMoveFiles_);
+    migrationControls->addWidget(browseMigration);
     migrationControls->addWidget(refreshMigration);
     migrationControls->addWidget(migrate);
     migrationControls->addWidget(restore);
@@ -790,7 +905,7 @@ QVector<CleanupEntry> MainWindow::selectedCleanupEntries() const {
 }
 
 bool MainWindow::allowScanOnly() const {
-    return false;
+    return currentCleanMode() != CleanupEngine::CleanMode::Recommended;
 }
 
 void MainWindow::cleanSelected() {
@@ -808,11 +923,14 @@ void MainWindow::cleanSelected() {
     options.backup = backupMode_->isChecked();
     options.allowScanOnly = allowScanOnly();
     options.backupRoot = backupRoot_;
+    const QString modeNotice = options.allowScanOnly
+        ? QStringLiteral("当前模式包含专业项，将按勾选项执行。")
+        : QStringLiteral("推荐模式只处理推荐清理项，专业项不会执行。");
     if (!options.simulate && !confirmDestructiveAction(
             this,
             QStringLiteral("清理选中"),
-            QStringLiteral("将删除选中清理项中的可清理文件。仅统计项目不会被删除。\n\n删除前备份: %1")
-                .arg(options.backup ? QStringLiteral("开启") : QStringLiteral("关闭"))
+            QStringLiteral("将删除选中清理项中的可清理文件。%1\n\n删除前备份: %2")
+                .arg(modeNotice, options.backup ? QStringLiteral("开启") : QStringLiteral("关闭"))
         )) {
         return;
     }
@@ -823,6 +941,7 @@ void MainWindow::cleanSelected() {
     } else {
         QMessageBox::warning(this, QStringLiteral("清理选中"), message);
     }
+    refreshDiskInfo();
     startScan();
 }
 
@@ -841,11 +960,14 @@ void MainWindow::cleanAllForCurrentMode() {
         QMessageBox::information(this, QStringLiteral("一键清理"), QStringLiteral("请先扫描出可清理项目。"));
         return;
     }
+    const QString modeNotice = options.allowScanOnly
+        ? QStringLiteral("当前模式包含专业项，将按当前模式执行。")
+        : QStringLiteral("推荐模式只处理推荐清理项，专业项不会执行。");
     if (!options.simulate && !confirmDestructiveAction(
             this,
             QStringLiteral("一键清理"),
-            QStringLiteral("将按当前模式删除可清理文件。仅统计项目不会被删除。\n\n删除前备份: %1")
-                .arg(options.backup ? QStringLiteral("开启") : QStringLiteral("关闭"))
+            QStringLiteral("将按当前模式删除可清理文件。%1\n\n删除前备份: %2")
+                .arg(modeNotice, options.backup ? QStringLiteral("开启") : QStringLiteral("关闭"))
         )) {
         return;
     }
@@ -856,6 +978,7 @@ void MainWindow::cleanAllForCurrentMode() {
     } else {
         QMessageBox::warning(this, QStringLiteral("一键清理"), message);
     }
+    refreshDiskInfo();
     startScan();
 }
 
@@ -1012,7 +1135,9 @@ void MainWindow::populateOptimizerTable(QTreeWidget* table, const QVector<Optimi
             childNode->setText(2, row.checkOnly ? QStringLiteral("检查") : QStringLiteral("明细"));
         }
     }
-    table->expandAll();
+    for (int i = 0; i < table->topLevelItemCount(); ++i) {
+        table->topLevelItem(i)->setExpanded(false);
+    }
 }
 
 void MainWindow::runOptimizerAction(const OptimizerItem& item) {
@@ -1130,6 +1255,120 @@ void MainWindow::runGlobalRestore() {
     QMessageBox::information(this, QStringLiteral("全局一键还原所有修改"), output);
 }
 
+void MainWindow::refreshGpuInfo() {
+    if (!gpuInfoTable_ || !gpuActionTable_) {
+        return;
+    }
+    gpuDevices_ = gpuEngine_.detectDevices();
+    gpuInfoTable_->setRowCount(0);
+    for (const GpuDeviceInfo& device : gpuDevices_) {
+        const int row = gpuInfoTable_->rowCount();
+        gpuInfoTable_->insertRow(row);
+        gpuInfoTable_->setItem(row, 0, textItem(device.vendor));
+        gpuInfoTable_->setItem(row, 1, textItem(device.name));
+        gpuInfoTable_->setItem(row, 2, textItem(device.driverVersion.isEmpty() ? QStringLiteral("--") : device.driverVersion));
+        gpuInfoTable_->setItem(row, 3, textItem(device.memoryMB > 0 ? QStringLiteral("%1 MB").arg(device.memoryMB) : QStringLiteral("--")));
+        gpuInfoTable_->setItem(row, 4, textItem(device.temperatureC >= 0 ? QStringLiteral("%1 C").arg(device.temperatureC) : QStringLiteral("--")));
+        gpuInfoTable_->setItem(row, 5, textItem(device.loadPercent >= 0 ? QStringLiteral("%1%").arg(device.loadPercent) : QStringLiteral("--")));
+        gpuInfoTable_->setItem(row, 6, textItem(device.capabilities.isEmpty() ? QStringLiteral("基础检测") : device.capabilities.join(QStringLiteral(", "))));
+    }
+    if (gpuDevices_.isEmpty()) {
+        gpuInfoTable_->insertRow(0);
+        gpuInfoTable_->setItem(0, 0, textItem(QStringLiteral("--")));
+        gpuInfoTable_->setItem(0, 1, textItem(QStringLiteral("未检测到显卡信息")));
+        gpuInfoTable_->setItem(0, 2, textItem(QStringLiteral("--")));
+        gpuInfoTable_->setItem(0, 3, textItem(QStringLiteral("--")));
+        gpuInfoTable_->setItem(0, 4, textItem(QStringLiteral("--")));
+        gpuInfoTable_->setItem(0, 5, textItem(QStringLiteral("--")));
+        gpuInfoTable_->setItem(0, 6, textItem(QStringLiteral("未检测到支持的显卡或官方检测入口")));
+    }
+    populateGpuActions();
+    if (gpuLog_) {
+        gpuLog_->append(QStringLiteral("[%1] 显卡检测完成，设备 %2 个，支持操作 %3 个。")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")))
+            .arg(gpuDevices_.size())
+            .arg(gpuActions_.size()));
+    }
+}
+
+void MainWindow::populateGpuActions() {
+    if (!gpuActionTable_) {
+        return;
+    }
+    gpuActions_ = gpuEngine_.supportedActions(gpuDevices_);
+    gpuActionTable_->setRowCount(0);
+    if (gpuActions_.isEmpty()) {
+        gpuActionTable_->insertRow(0);
+        gpuActionTable_->setItem(0, 0, textItem(QStringLiteral("--")));
+        gpuActionTable_->setItem(0, 1, textItem(QStringLiteral("当前机器没有检测到可执行的显卡优化操作")));
+        gpuActionTable_->setItem(0, 2, textItem(QStringLiteral("--")));
+        gpuActionTable_->setItem(0, 3, textItem(QStringLiteral("只显示当前机器真正支持的操作")));
+        gpuActionTable_->setItem(0, 4, textItem(QStringLiteral("--")));
+        gpuActionTable_->setItem(0, 5, textItem(QStringLiteral("--")));
+        return;
+    }
+    for (int i = 0; i < gpuActions_.size(); ++i) {
+        const GpuOptimizationAction& action = gpuActions_.at(i);
+        if (!action.supported) {
+            continue;
+        }
+        const int row = gpuActionTable_->rowCount();
+        gpuActionTable_->insertRow(row);
+        gpuActionTable_->setItem(row, 0, textItem(action.vendor));
+        gpuActionTable_->setItem(row, 1, textItem(action.title));
+        gpuActionTable_->setItem(row, 2, textItem(action.riskLabel));
+        gpuActionTable_->setItem(row, 3, textItem(action.description));
+        auto* apply = primaryButton(action.modifiesSystem ? QStringLiteral("执行") : QStringLiteral("打开/查看"));
+        connect(apply, &QPushButton::clicked, this, [this, i] { runGpuAction(i, false); });
+        gpuActionTable_->setCellWidget(row, 4, apply);
+        auto* restore = secondaryButton(QStringLiteral("还原"));
+        restore->setEnabled(!action.revertCommands.isEmpty());
+        connect(restore, &QPushButton::clicked, this, [this, i] { runGpuAction(i, true); });
+        gpuActionTable_->setCellWidget(row, 5, restore);
+    }
+}
+
+void MainWindow::runGpuAction(int row, bool revert) {
+    if (row < 0 || row >= gpuActions_.size()) {
+        return;
+    }
+    const GpuOptimizationAction action = gpuActions_.at(row);
+    if (!action.supported) {
+        QMessageBox::information(this, QStringLiteral("显卡优化"), QStringLiteral("当前机器不支持该操作。"));
+        return;
+    }
+    if (revert && action.revertCommands.isEmpty()) {
+        QMessageBox::information(this, action.title, QStringLiteral("该操作不修改系统，无需还原。"));
+        return;
+    }
+    if (action.modifiesSystem || revert) {
+        if (!confirmDestructiveAction(
+                this,
+                revert ? QStringLiteral("确认还原显卡设置") : QStringLiteral("确认执行显卡优化"),
+                QStringLiteral("%1\n\n%2\n\n风险: %3").arg(action.title, action.description, action.riskLabel)
+            )) {
+            return;
+        }
+    }
+    int exitCode = 0;
+    const QString output = revert
+        ? gpuEngine_.restoreAction(action, &exitCode)
+        : gpuEngine_.runAction(action, &exitCode);
+    const QString logLine = QStringLiteral("[%1] %2 %3，退出码 %4")
+        .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")))
+        .arg(revert ? QStringLiteral("还原") : QStringLiteral("执行"))
+        .arg(action.title)
+        .arg(exitCode);
+    if (gpuLog_) {
+        gpuLog_->append(logLine);
+        if (!output.isEmpty()) {
+            gpuLog_->append(output.left(2000));
+        }
+    }
+    showOperationLog(logLine);
+    QMessageBox::information(this, action.title, QStringLiteral("退出码 %1\n%2").arg(exitCode).arg(output));
+}
+
 void MainWindow::populateBxItems() {
     applyBxMode(bxMode_);
 }
@@ -1172,8 +1411,11 @@ void MainWindow::applyBxOptimization() {
 }
 
 void MainWindow::refreshInstalledApps() {
-    uninstallTable_->setRowCount(0);
+    if (!uninstallTable_ || !storeUninstallTable_) {
+        return;
+    }
     QVector<QJsonObject> apps;
+    QVector<QJsonObject> storeApps;
 #ifdef Q_OS_WIN
     const QStringList roots = {
         QStringLiteral("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
@@ -1191,9 +1433,41 @@ void MainWindow::refreshInstalledApps() {
                 app.insert(QStringLiteral("publisher"), settings.value(QStringLiteral("Publisher")).toString());
                 app.insert(QStringLiteral("version"), settings.value(QStringLiteral("DisplayVersion")).toString());
                 app.insert(QStringLiteral("command"), settings.value(QStringLiteral("UninstallString")).toString());
-                apps.push_back(app);
+                const bool systemComponent = settings.value(QStringLiteral("SystemComponent")).toInt() == 1;
+                const QString releaseType = settings.value(QStringLiteral("ReleaseType")).toString();
+                if (!systemComponent && releaseType.isEmpty()) {
+                    apps.push_back(app);
+                }
             }
             settings.endGroup();
+        }
+    }
+    QProcess appx;
+    const QString script = QStringLiteral("Get-AppxPackage | Select-Object Name,Publisher,Version,PackageFullName | ConvertTo-Json -Compress");
+    appx.start(QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), script});
+    if (appx.waitForFinished(12000) && appx.exitCode() == 0) {
+        QJsonParseError error;
+        const QJsonDocument doc = QJsonDocument::fromJson(appx.readAllStandardOutput(), &error);
+        QJsonArray rows;
+        if (error.error == QJsonParseError::NoError && doc.isArray()) {
+            rows = doc.array();
+        } else if (error.error == QJsonParseError::NoError && doc.isObject()) {
+            rows.push_back(doc.object());
+        }
+        for (const QJsonValue& value : rows) {
+            const QJsonObject object = value.toObject();
+            const QString packageFullName = object.value(QStringLiteral("PackageFullName")).toString();
+            if (packageFullName.isEmpty()) {
+                continue;
+            }
+            QString escapedPackage = packageFullName;
+            escapedPackage.replace(QStringLiteral("'"), QStringLiteral("''"));
+            QJsonObject app;
+            app.insert(QStringLiteral("name"), object.value(QStringLiteral("Name")).toString());
+            app.insert(QStringLiteral("publisher"), packageFullName);
+            app.insert(QStringLiteral("version"), object.value(QStringLiteral("Version")).toString());
+            app.insert(QStringLiteral("command"), QStringLiteral("powershell -NoProfile -Command \"Get-AppxPackage -PackageFullName '%1' | Remove-AppxPackage\"").arg(escapedPackage));
+            storeApps.push_back(app);
         }
     }
 #endif
@@ -1205,17 +1479,34 @@ void MainWindow::refreshInstalledApps() {
         app.insert(QStringLiteral("command"), QString());
         apps.push_back(app);
     }
+    if (storeApps.isEmpty()) {
+        QJsonObject app;
+        app.insert(QStringLiteral("name"), QStringLiteral("当前环境未读取到微软商店应用"));
+        app.insert(QStringLiteral("publisher"), QStringLiteral("Windows 上会读取 Appx 包列表"));
+        app.insert(QStringLiteral("version"), QStringLiteral("--"));
+        app.insert(QStringLiteral("command"), QString());
+        storeApps.push_back(app);
+    }
+    populateUninstallTable(uninstallTable_, apps, QStringLiteral("卸载"));
+    populateUninstallTable(storeUninstallTable_, storeApps, QStringLiteral("移除"));
+}
+
+void MainWindow::populateUninstallTable(QTableWidget* table, const QVector<QJsonObject>& apps, const QString& actionLabel) {
+    if (!table) {
+        return;
+    }
+    table->setRowCount(0);
     for (const QJsonObject& app : apps) {
-        const int row = uninstallTable_->rowCount();
-        uninstallTable_->insertRow(row);
-        uninstallTable_->setItem(row, 0, textItem(app.value(QStringLiteral("name")).toString()));
-        uninstallTable_->setItem(row, 1, textItem(app.value(QStringLiteral("publisher")).toString()));
-        uninstallTable_->setItem(row, 2, textItem(app.value(QStringLiteral("version")).toString()));
-        uninstallTable_->setItem(row, 3, textItem(app.value(QStringLiteral("command")).toString()));
-        auto* button = secondaryButton(QStringLiteral("卸载"));
+        const int row = table->rowCount();
+        table->insertRow(row);
+        table->setItem(row, 0, textItem(app.value(QStringLiteral("name")).toString()));
+        table->setItem(row, 1, textItem(app.value(QStringLiteral("publisher")).toString()));
+        table->setItem(row, 2, textItem(app.value(QStringLiteral("version")).toString()));
+        table->setItem(row, 3, textItem(app.value(QStringLiteral("command")).toString()));
+        auto* button = secondaryButton(actionLabel);
         const QString command = app.value(QStringLiteral("command")).toString();
         connect(button, &QPushButton::clicked, this, [this, command] { runUninstallCommand(command); });
-        uninstallTable_->setCellWidget(row, 4, button);
+        table->setCellWidget(row, 4, button);
     }
 }
 
@@ -1319,10 +1610,21 @@ void MainWindow::migrateSelectedFolders() {
         QMessageBox::information(this, QStringLiteral("系统目录一键迁移专区"), QStringLiteral("请先填写目标根目录。"));
         return;
     }
+    int checkedCount = 0;
+    for (int row = 0; row < migrationTable_->rowCount(); ++row) {
+        QTableWidgetItem* check = migrationTable_->item(row, 0);
+        if (check && check->checkState() == Qt::Checked) {
+            ++checkedCount;
+        }
+    }
+    if (checkedCount == 0) {
+        QMessageBox::information(this, QStringLiteral("文件迁移"), QStringLiteral("请先勾选需要迁移的个人文件夹。"));
+        return;
+    }
     if (!confirmDestructiveAction(
             this,
             QStringLiteral("系统目录一键迁移专区"),
-            QStringLiteral("将把勾选的系统目录迁移到:\n%1\n\n请确认目标磁盘空间充足。").arg(targetRoot)
+            QStringLiteral("将把勾选的 %1 个系统目录迁移到:\n%2\n\n请确认目标磁盘空间充足。").arg(checkedCount).arg(targetRoot)
         )) {
         return;
     }
@@ -1357,6 +1659,17 @@ void MainWindow::migrateSelectedFolders() {
 }
 
 void MainWindow::restoreSelectedFolders() {
+    int checkedCount = 0;
+    for (int row = 0; row < migrationTable_->rowCount(); ++row) {
+        QTableWidgetItem* check = migrationTable_->item(row, 0);
+        if (check && check->checkState() == Qt::Checked) {
+            ++checkedCount;
+        }
+    }
+    if (checkedCount == 0) {
+        QMessageBox::information(this, QStringLiteral("还原选中"), QStringLiteral("请先勾选需要还原的已迁移文件夹。"));
+        return;
+    }
     if (!confirmDestructiveAction(this, QStringLiteral("还原选中"), QStringLiteral("将还原勾选的已迁移系统目录。是否继续？"))) {
         return;
     }
@@ -1448,7 +1761,8 @@ void MainWindow::populateMigrationFolders(const QVector<MigrationFolder>& folder
         const int row = migrationTable_->rowCount();
         migrationTable_->insertRow(row);
         auto* check = new QTableWidgetItem();
-        check->setCheckState(Qt::Unchecked);
+        const bool defaultChecked = defaultMigrationKey(folder.key) && folder.exists && !folder.migrated;
+        check->setCheckState(defaultChecked ? Qt::Checked : Qt::Unchecked);
         check->setData(Qt::UserRole, folder.key);
         migrationTable_->setItem(row, 0, check);
         migrationTable_->setItem(row, 1, textItem(folder.name));

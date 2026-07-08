@@ -18,6 +18,8 @@ qt_add_executable(CDriveCleanerQt
     src/DismRuleScanner.cpp
     src/FileManagementEngine.h
     src/FileManagementEngine.cpp
+    src/GpuOptimizationEngine.h
+    src/GpuOptimizationEngine.cpp
     src/SystemCatalog.h
     src/SystemCatalog.cpp
     src/AccountStore.h

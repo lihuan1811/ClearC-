@@ -26,6 +26,7 @@ struct CleanupRule {
     bool aggregate = true;
     bool recommended = true;
     bool professional = true;
+    bool privacySensitive = false;
 };
 
 struct CleanupEntry {
@@ -37,6 +38,7 @@ struct CleanupEntry {
     bool scanOnly = false;
     bool recommended = true;
     bool professional = true;
+    bool privacySensitive = false;
 };
 
 struct CleanupScanResult {

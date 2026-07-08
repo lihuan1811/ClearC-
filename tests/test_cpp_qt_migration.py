@@ -19,6 +19,7 @@ def test_cpp_qt_project_has_build_entrypoints():
         "src/CleanupEngine.cpp",
         "src/DismRuleScanner.cpp",
         "src/FileManagementEngine.cpp",
+        "src/GpuOptimizationEngine.cpp",
         "src/SystemCatalog.cpp",
         "src/AccountStore.cpp",
         "src/MainWindow.cpp",
@@ -128,6 +129,9 @@ def test_cleanup_engine_protects_scan_only_items_and_backup_failures():
 
     for token in [
         "if (entry.scanOnly && !options.allowScanOnly)",
+        "privacySensitive",
+        "if (!entry.privacySensitive)",
+        "browser_extensions",
         "const QStringList targets = entry.files;",
         "backupFile(path, backupRoot, &backupError)",
         "result.errors.push_back(backupError)",
@@ -146,8 +150,15 @@ def test_system_catalog_ports_optimization_bx_and_repair_commands():
     for token in [
         "开机加速",
         "运行内存",
+        "windowsStartupRegistryItems",
+        "windowsStartupFolderItems",
+        "windowsMemoryProcessItems",
+        "当前用户 / 登录启动项",
+        "运行进程",
+        "tasklist /FO CSV",
         "系统优化",
         "隐私清理",
+        "浏览器账号与插件数据",
         "注册表清理",
         "BX(优化)",
         "基本",
@@ -246,6 +257,10 @@ def test_main_window_ports_all_expected_pages_and_async_workflows():
         "文件夹占用",
         "空文件夹",
         "文件迁移",
+        "用户安装程序",
+        "微软商店应用",
+        "storeUninstallTable_",
+        "populateUninstallTable",
         "广告清理",
         "系统目录一键迁移专区",
         "Windows 设置优化",
@@ -260,9 +275,10 @@ def test_main_window_guards_destructive_cleanup_and_file_deletes():
     source = read(SRC / "MainWindow.cpp")
 
     for token in [
-        "bool MainWindow::allowScanOnly() const {\n    return false;",
+        "bool MainWindow::allowScanOnly() const {\n    return currentCleanMode() != CleanupEngine::CleanMode::Recommended;",
         "confirmDestructiveAction",
-        "仅统计项目不会被删除",
+        "当前模式包含专业项",
+        "推荐模式只处理推荐清理项",
         "scanWatcher_->isRunning()",
         "cleanEntriesDetailed",
         "fileTabs_->currentWidget() == largeFileTable_",
@@ -299,6 +315,52 @@ def test_file_management_engine_ports_flutter_file_tools():
         assert token in header + source
 
 
+def test_cpp_gpu_optimization_module_detects_supported_gpu_actions():
+    header = read(SRC / "GpuOptimizationEngine.h")
+    source = read(SRC / "GpuOptimizationEngine.cpp")
+    main_window_header = read(SRC / "MainWindow.h")
+    main_window = read(SRC / "MainWindow.cpp")
+
+    for token in [
+        "class GpuOptimizationEngine",
+        "struct GpuDeviceInfo",
+        "struct GpuOptimizationAction",
+        "detectDevices",
+        "supportedActions",
+        "runAction",
+        "restoreAction",
+        "Win32_VideoController",
+        "nvidia-smi",
+        "nvapi64.dll",
+        "NVAPI",
+        "ADLX",
+        "AMDSoftware",
+        "Intel",
+        "driverVersion",
+        "memoryMB",
+        "temperatureC",
+        "loadPercent",
+        "supported",
+        "requiresConfirmation",
+        "revertCommands",
+    ]:
+        assert token in header + source
+
+    for token in [
+        "显卡优化",
+        "createGpuPage",
+        "gpuInfoTable_",
+        "gpuActionTable_",
+        "gpuLog_",
+        "refreshGpuInfo",
+        "populateGpuActions",
+        "runGpuAction",
+        "confirmDestructiveAction",
+        "showOperationLog",
+    ]:
+        assert token in main_window_header + main_window
+
+
 def test_file_migration_handles_cross_volume_and_junction_restore_safely():
     source = read(SRC / "FileManagementEngine.cpp")
 
@@ -326,5 +388,26 @@ def test_backup_directory_selection_is_used_by_cleaning_and_manager():
         "options.backupRoot = backupRoot_;",
         "CleanupEngine::backupInfo(backupRoot_)",
         "CleanupEngine::pruneBackups(backupRoot_)",
+    ]:
+        assert token in header + source
+
+
+def test_docx_change_requests_are_reflected_in_cpp_ui():
+    header = read(SRC / "MainWindow.h")
+    source = read(SRC / "MainWindow.cpp")
+
+    for token in [
+        "backupMode_->setChecked(true)",
+        "refreshDiskInfo();\n    startScan();",
+        "return currentCleanMode() != CleanupEngine::CleanMode::Recommended;",
+        "table->topLevelItem(i)->setExpanded(false)",
+        "defaultMigrationTargetRoot",
+        "选择目标",
+        "defaultMigrationKey",
+        "请先勾选需要迁移的个人文件夹",
+        "Get-AppxPackage",
+        "Remove-AppxPackage",
+        "uninstallTabs_",
+        "storeUninstallTable_",
     ]:
         assert token in header + source

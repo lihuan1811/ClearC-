@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStandardPaths>
 
 #include <algorithm>
@@ -47,6 +48,24 @@ bool isSameOrChild(const QString& path, const QString& root) {
     const QString cleanPath = QDir::cleanPath(QFileInfo(path).absoluteFilePath()).toLower();
     const QString cleanRoot = QDir::cleanPath(QFileInfo(root).absoluteFilePath()).toLower();
     return cleanPath == cleanRoot || cleanPath.startsWith(cleanRoot + QLatin1Char('/'));
+}
+
+bool shouldSkipScanDirectory(const QFileInfo& info) {
+    if (!info.isDir()) {
+        return false;
+    }
+    const QString name = info.fileName().toLower();
+    static const QSet<QString> skippedNames = {
+        QStringLiteral("$recycle.bin"),
+        QStringLiteral("system volume information"),
+        QStringLiteral("windowsapps"),
+        QStringLiteral("winsxs"),
+        QStringLiteral("$windows.~ws"),
+        QStringLiteral("$windows.~bt"),
+        QStringLiteral("config.msi"),
+        QStringLiteral("driverstore"),
+    };
+    return skippedNames.contains(name) || FileManagementEngine::isReparsePoint(info.absoluteFilePath());
 }
 
 QString uniqueSiblingBackupPath(const QString& path) {
@@ -108,6 +127,9 @@ QVector<FolderUsageEntry> FileManagementEngine::scanFolderUsage(const QString& r
     }
 
     for (const QFileInfo& info : root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks)) {
+        if (shouldSkipScanDirectory(info)) {
+            continue;
+        }
         int fileCount = 0;
         FolderUsageEntry entry;
         entry.path = info.absoluteFilePath();
@@ -425,12 +447,30 @@ qint64 FileManagementEngine::directorySize(const QString& path, int* fileCount) 
     if (fileCount) {
         *fileCount = 0;
     }
-    QDirIterator iterator(path, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
-    while (iterator.hasNext()) {
-        iterator.next();
-        total += iterator.fileInfo().size();
-        if (fileCount) {
-            ++(*fileCount);
+    QVector<QString> pending = {path};
+    while (!pending.isEmpty()) {
+        const QString current = pending.takeLast();
+        const QFileInfo currentInfo(current);
+        if (currentInfo.absoluteFilePath() != QFileInfo(path).absoluteFilePath() && shouldSkipScanDirectory(currentInfo)) {
+            continue;
+        }
+        const QFileInfoList entries = QDir(current).entryInfoList(
+            QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks
+        );
+        for (const QFileInfo& info : entries) {
+            if (info.isDir()) {
+                if (!shouldSkipScanDirectory(info)) {
+                    pending.push_back(info.absoluteFilePath());
+                }
+                continue;
+            }
+            if (!info.isFile()) {
+                continue;
+            }
+            total += info.size();
+            if (fileCount) {
+                ++(*fileCount);
+            }
         }
     }
     return total;

@@ -3,10 +3,12 @@
 #include "AccountStore.h"
 #include "CleanupEngine.h"
 #include "FileManagementEngine.h"
+#include "GpuOptimizationEngine.h"
 #include "SystemCatalog.h"
 
 #include <QCheckBox>
 #include <QFutureWatcher>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMainWindow>
@@ -27,6 +29,7 @@ private:
     QWidget* createSidebar();
     QWidget* createCleanPage();
     QWidget* createOptimizePage();
+    QWidget* createGpuPage();
     QWidget* createBxPage();
     QWidget* createUninstallPage();
     QWidget* createFilePage();
@@ -70,11 +73,16 @@ private:
     void runAdBlockAction(bool enable);
     void runGlobalRestore();
 
+    void refreshGpuInfo();
+    void populateGpuActions();
+    void runGpuAction(int row, bool revert);
+
     void populateBxItems();
     void applyBxMode(const QString& mode);
     void applyBxOptimization();
 
     void refreshInstalledApps();
+    void populateUninstallTable(QTableWidget* table, const QVector<QJsonObject>& apps, const QString& actionLabel);
     void runUninstallCommand(const QString& command);
 
     void chooseFileRoot();
@@ -107,6 +115,7 @@ private:
 
     CleanupEngine cleanupEngine_;
     FileManagementEngine fileEngine_;
+    GpuOptimizationEngine gpuEngine_;
     AccountStore accountStore_;
     QString backupRoot_;
     QStackedWidget* pages_ = nullptr;
@@ -130,11 +139,18 @@ private:
     QTabWidget* optimizerTabs_ = nullptr;
     QMap<QString, QTreeWidget*> optimizerTables_;
     QTableWidget* windowsOptimizationTable_ = nullptr;
+    QTableWidget* gpuInfoTable_ = nullptr;
+    QTableWidget* gpuActionTable_ = nullptr;
+    QTextEdit* gpuLog_ = nullptr;
+    QVector<GpuDeviceInfo> gpuDevices_;
+    QVector<GpuOptimizationAction> gpuActions_;
     QTableWidget* bxTable_ = nullptr;
     QLabel* bxStatusLabel_ = nullptr;
     QString bxMode_ = QStringLiteral("basic");
 
+    QTabWidget* uninstallTabs_ = nullptr;
     QTableWidget* uninstallTable_ = nullptr;
+    QTableWidget* storeUninstallTable_ = nullptr;
     QTabWidget* fileTabs_ = nullptr;
     QString fileRoot_;
     QLabel* fileRootLabel_ = nullptr;

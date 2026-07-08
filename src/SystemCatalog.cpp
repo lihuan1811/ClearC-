@@ -1,9 +1,23 @@
 #include "SystemCatalog.h"
 
+#include <QDir>
+#include <QFileInfo>
 #include <QProcess>
+#include <QRegularExpression>
+#include <QSettings>
 #include <QSysInfo>
 
+#include <algorithm>
+
 namespace {
+
+struct ProcessUsageRow {
+    QString name;
+    QString pid;
+    QString session;
+    QString memoryText;
+    qint64 memoryKb = 0;
+};
 
 OptimizerItem item(
     const QString& id,
@@ -31,16 +45,213 @@ OptimizerItem item(
     return row;
 }
 
+QString quoted(const QString& value) {
+    QString escaped = value;
+    escaped.replace(QStringLiteral("\""), QStringLiteral("\\\""));
+    return QStringLiteral("\"%1\"").arg(escaped);
+}
+
+QString startupRegistryLabel(const QString& rootName, const QString& subkey) {
+    const QString scope = rootName == QStringLiteral("HKEY_CURRENT_USER")
+        ? QStringLiteral("当前用户")
+        : QStringLiteral("所有用户");
+    QString type = QStringLiteral("登录启动项");
+    if (subkey.contains(QStringLiteral("RunOnce"), Qt::CaseInsensitive)) {
+        type = QStringLiteral("一次性启动项");
+    } else if (subkey.contains(QStringLiteral("WOW6432Node"), Qt::CaseInsensitive)) {
+        type = QStringLiteral("32位程序启动项");
+    }
+    return QStringLiteral("%1 / %2").arg(scope, type);
+}
+
+QVector<OptimizerItem> windowsStartupRegistryItems() {
+    QVector<OptimizerItem> rows;
+#ifdef Q_OS_WIN
+    struct RegistryLocation {
+        QString rootName;
+        QString shortName;
+        QString subkey;
+    };
+    const QVector<RegistryLocation> locations = {
+        {QStringLiteral("HKEY_CURRENT_USER"), QStringLiteral("HKCU"), QStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Run")},
+        {QStringLiteral("HKEY_CURRENT_USER"), QStringLiteral("HKCU"), QStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce")},
+        {QStringLiteral("HKEY_LOCAL_MACHINE"), QStringLiteral("HKLM"), QStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Run")},
+        {QStringLiteral("HKEY_LOCAL_MACHINE"), QStringLiteral("HKLM"), QStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce")},
+        {QStringLiteral("HKEY_LOCAL_MACHINE"), QStringLiteral("HKLM"), QStringLiteral("Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run")},
+    };
+
+    int counter = 0;
+    for (const RegistryLocation& location : locations) {
+        const QString fullKey = location.rootName + QStringLiteral("\\") + location.subkey;
+        QSettings settings(fullKey, QSettings::NativeFormat);
+        for (const QString& valueName : settings.childKeys()) {
+            const QString command = settings.value(valueName).toString().trimmed();
+            if (valueName.trimmed().isEmpty() || command.isEmpty()) {
+                continue;
+            }
+            rows.push_back(item(
+                QStringLiteral("startup-reg-%1").arg(++counter),
+                QStringLiteral("开机加速"),
+                valueName,
+                QStringLiteral("%1 (%2)").arg(startupRegistryLabel(location.rootName, location.subkey), location.shortName),
+                QStringLiteral("启动命令: %1").arg(command),
+                QStringLiteral("reg delete %1 /v %2 /f").arg(quoted(fullKey), quoted(valueName)),
+                QStringLiteral("禁用"),
+                false,
+                false,
+                {QStringLiteral("来源: %1").arg(fullKey), QStringLiteral("命令: %1").arg(command)}
+            ));
+        }
+    }
+#endif
+    return rows;
+}
+
+QVector<OptimizerItem> windowsStartupFolderItems() {
+    QVector<OptimizerItem> rows;
+#ifdef Q_OS_WIN
+    struct StartupFolder {
+        QString label;
+        QString path;
+    };
+    const QString appData = qEnvironmentVariable("APPDATA");
+    const QString programData = qEnvironmentVariable("ProgramData");
+    QVector<StartupFolder> folders;
+    if (!appData.trimmed().isEmpty()) {
+        folders.push_back(StartupFolder{QStringLiteral("当前用户启动文件夹"), QDir(appData).filePath(QStringLiteral("Microsoft/Windows/Start Menu/Programs/Startup"))});
+    }
+    if (!programData.trimmed().isEmpty()) {
+        folders.push_back(StartupFolder{QStringLiteral("所有用户启动文件夹"), QDir(programData).filePath(QStringLiteral("Microsoft/Windows/Start Menu/Programs/Startup"))});
+    }
+
+    int counter = 0;
+    for (const StartupFolder& folder : folders) {
+        QDir dir(folder.path);
+        if (!dir.exists()) {
+            continue;
+        }
+        const QFileInfoList entries = dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
+        for (const QFileInfo& entry : entries) {
+            rows.push_back(item(
+                QStringLiteral("startup-folder-%1").arg(++counter),
+                QStringLiteral("开机加速"),
+                entry.completeBaseName().isEmpty() ? entry.fileName() : entry.completeBaseName(),
+                folder.label,
+                QDir::toNativeSeparators(entry.absoluteFilePath()),
+                QStringLiteral("explorer /select,%1").arg(quoted(QDir::toNativeSeparators(entry.absoluteFilePath()))),
+                QStringLiteral("定位"),
+                false,
+                false,
+                {QStringLiteral("文件夹: %1").arg(QDir::toNativeSeparators(folder.path))}
+            ));
+        }
+    }
+#endif
+    return rows;
+}
+
+QString processOutput(const QString& executable, const QStringList& arguments, int timeoutMs = 8000) {
+    QProcess process;
+    process.start(executable, arguments);
+    if (!process.waitForFinished(timeoutMs)) {
+        process.kill();
+        process.waitForFinished();
+    }
+    return QString::fromLocal8Bit(process.readAllStandardOutput());
+}
+
+QStringList parseCsvLine(const QString& line) {
+    QStringList columns;
+    QString current;
+    bool quotedField = false;
+    for (int i = 0; i < line.size(); ++i) {
+        const QChar ch = line.at(i);
+        if (ch == QLatin1Char('"')) {
+            if (quotedField && i + 1 < line.size() && line.at(i + 1) == QLatin1Char('"')) {
+                current.append(ch);
+                ++i;
+            } else {
+                quotedField = !quotedField;
+            }
+            continue;
+        }
+        if (ch == QLatin1Char(',') && !quotedField) {
+            columns.push_back(current.trimmed());
+            current.clear();
+            continue;
+        }
+        current.append(ch);
+    }
+    columns.push_back(current.trimmed());
+    return columns;
+}
+
+qint64 tasklistMemoryKb(const QString& value) {
+    QString digits;
+    for (const QChar& ch : value) {
+        if (ch.isDigit()) {
+            digits.append(ch);
+        }
+    }
+    return digits.toLongLong();
+}
+
+QVector<OptimizerItem> windowsMemoryProcessItems() {
+    QVector<OptimizerItem> rows;
+#ifdef Q_OS_WIN
+    const QString output = processOutput(QStringLiteral("tasklist"), {QStringLiteral("/FO"), QStringLiteral("CSV"), QStringLiteral("/NH")});
+    QVector<ProcessUsageRow> processes;
+    for (const QString& line : output.split(QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts)) {
+        const QStringList columns = parseCsvLine(line);
+        if (columns.size() < 5) {
+            continue;
+        }
+        ProcessUsageRow row;
+        row.name = columns.at(0);
+        row.pid = columns.at(1);
+        row.session = columns.at(2);
+        row.memoryText = columns.at(4);
+        row.memoryKb = tasklistMemoryKb(row.memoryText);
+        processes.push_back(row);
+    }
+    std::sort(processes.begin(), processes.end(), [](const ProcessUsageRow& a, const ProcessUsageRow& b) {
+        return a.memoryKb > b.memoryKb;
+    });
+
+    const int limit = qMin(60, processes.size());
+    for (int i = 0; i < limit; ++i) {
+        const ProcessUsageRow& process = processes.at(i);
+        rows.push_back(item(
+            QStringLiteral("memory-process-%1").arg(process.pid),
+            QStringLiteral("运行内存"),
+            QStringLiteral("%1 (PID %2)").arg(process.name, process.pid),
+            QStringLiteral("运行进程 / %1").arg(process.session),
+            QStringLiteral("内存占用: %1").arg(process.memoryText),
+            QStringLiteral("taskkill /PID %1 /F").arg(process.pid),
+            QStringLiteral("结束"),
+            false,
+            false,
+            {QStringLiteral("进程: %1").arg(process.name), QStringLiteral("PID: %1").arg(process.pid)}
+        ));
+    }
+#endif
+    return rows;
+}
+
 }  // namespace
 
 QVector<OptimizerItem> SystemCatalog::populateStartupItems() {
-    QVector<OptimizerItem> rows = fallbackStartupItems();
+    QVector<OptimizerItem> rows = windowsStartupRegistryItems();
+    rows += windowsStartupFolderItems();
+    if (rows.isEmpty()) {
+        rows = fallbackStartupItems();
+    }
     rows.push_back(item(
         QStringLiteral("startup-user-run"),
         QStringLiteral("开机加速"),
-        QStringLiteral("用户 Run 启动项"),
-        QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
-        QStringLiteral("查看并禁用当前用户自动启动程序。"),
+        QStringLiteral("检查当前用户 Run 启动项"),
+        QStringLiteral("当前用户 / 登录启动项"),
+        QStringLiteral("枚举 HKCU Run，作为启动项诊断入口。"),
         QStringLiteral("reg query \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\""),
         QStringLiteral("检查"),
         true,
@@ -50,9 +261,9 @@ QVector<OptimizerItem> SystemCatalog::populateStartupItems() {
     rows.push_back(item(
         QStringLiteral("startup-machine-run"),
         QStringLiteral("开机加速"),
-        QStringLiteral("系统 Run 启动项"),
-        QStringLiteral("HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
-        QStringLiteral("查看并禁用全局自动启动程序，需要管理员权限。"),
+        QStringLiteral("检查所有用户 Run 启动项"),
+        QStringLiteral("所有用户 / 登录启动项"),
+        QStringLiteral("枚举 HKLM Run，需要管理员权限查看和处理。"),
         QStringLiteral("reg query \"HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\""),
         QStringLiteral("检查"),
         true,
@@ -62,9 +273,9 @@ QVector<OptimizerItem> SystemCatalog::populateStartupItems() {
     rows.push_back(item(
         QStringLiteral("startup-folder"),
         QStringLiteral("开机加速"),
+        QStringLiteral("打开启动文件夹"),
         QStringLiteral("启动文件夹"),
-        QStringLiteral("%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"),
-        QStringLiteral("查看启动文件夹中的快捷方式。"),
+        QStringLiteral("查看当前用户启动文件夹中的快捷方式。"),
         QStringLiteral("explorer \"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\""),
         QStringLiteral("打开"),
         true,
@@ -75,13 +286,16 @@ QVector<OptimizerItem> SystemCatalog::populateStartupItems() {
 }
 
 QVector<OptimizerItem> SystemCatalog::populateMemoryItems() {
-    QVector<OptimizerItem> rows = fallbackMemoryItems();
+    QVector<OptimizerItem> rows = windowsMemoryProcessItems();
+    if (rows.isEmpty()) {
+        rows = fallbackMemoryItems();
+    }
     rows.push_back(item(
         QStringLiteral("memory-tasklist"),
         QStringLiteral("运行内存"),
-        QStringLiteral("高占用进程列表"),
-        QStringLiteral("tasklist"),
-        QStringLiteral("列出当前进程和内存占用，方便手动结束异常进程。"),
+        QStringLiteral("刷新进程内存列表"),
+        QStringLiteral("tasklist /FO CSV"),
+        QStringLiteral("按进程名、PID、内存占用细分显示。"),
         QStringLiteral("tasklist /v"),
         QStringLiteral("刷新"),
         true,
@@ -150,6 +364,14 @@ QVector<OptimizerItem> SystemCatalog::populatePrivacyItems() {
         item(QStringLiteral("privacy-recent"), QStringLiteral("隐私清理"), QStringLiteral("清理最近文档记录"),
              QStringLiteral("Recent"), QStringLiteral("删除最近打开文件记录。"),
              QStringLiteral("del /q \"%APPDATA%\\Microsoft\\Windows\\Recent\\*\""), QStringLiteral("清理")),
+        item(QStringLiteral("privacy-browser-account-extensions"), QStringLiteral("隐私清理"), QStringLiteral("浏览器账号与插件数据"),
+             QStringLiteral("Chrome/Edge/Firefox Profile"),
+             QStringLiteral("包含浏览器账号、插件和扩展配置，只提供查看入口，需用户单独确认。"),
+             QStringLiteral("explorer \"%LOCALAPPDATA%\\Google\\Chrome\\User Data\\Default\""),
+             QStringLiteral("查看"), false, true,
+             {QStringLiteral("%LOCALAPPDATA%\\Google\\Chrome\\User Data\\Default\\Extensions"),
+              QStringLiteral("%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\Default\\Extensions"),
+              QStringLiteral("%APPDATA%\\Mozilla\\Firefox\\Profiles")}),
     };
 }
 
