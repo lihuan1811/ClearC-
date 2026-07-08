@@ -110,8 +110,9 @@ private:
     void restoreSelectedFolders();
     void populateLargeFiles(const QVector<FileEntry>& files);
     void populateDuplicateFiles(const QVector<QVector<FileEntry>>& groups);
-    void populateFolderUsage(const QVector<FolderUsageEntry>& entries);
-    void populateFolderUsageTreemap(const QVector<FolderUsageEntry>& entries);
+    void populateFolderUsage(const FolderUsageScan& scan);
+    void populateExtensionUsageTable(const QVector<ExtensionUsageEntry>& entries, qint64 totalBytes);
+    void populateFolderUsageTreemap(const QVector<FileUsageEntry>& entries, qint64 totalBytes, int totalFileCount);
     void populateEmptyFolders(const QVector<EmptyFolderEntry>& folders);
     void populateMigrationFolders(const QVector<MigrationFolder>& folders);
     void deleteSelectedFileItems();
@@ -176,6 +177,7 @@ private:
     QLabel* fileRootLabel_ = nullptr;
     QWidget* folderUsagePage_ = nullptr;
     QTreeWidget* folderUsageTree_ = nullptr;
+    QTableWidget* folderExtensionTable_ = nullptr;
     QGraphicsScene* folderUsageMapScene_ = nullptr;
     QGraphicsView* folderUsageMapView_ = nullptr;
     QTableWidget* largeFileTable_ = nullptr;

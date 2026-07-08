@@ -26,6 +26,26 @@ struct FolderUsageEntry {
     int fileCount = 0;
 };
 
+struct FileUsageEntry {
+    QString path;
+    QString extension;
+    qint64 sizeBytes = 0;
+    int fileCount = 1;
+};
+
+struct ExtensionUsageEntry {
+    QString extension;
+    QString description;
+    qint64 sizeBytes = 0;
+    int fileCount = 0;
+};
+
+struct FolderUsageScan {
+    QVector<FolderUsageEntry> folders;
+    QVector<FileUsageEntry> files;
+    QVector<ExtensionUsageEntry> extensions;
+};
+
 struct EmptyFolderEntry {
     QString path;
 };
@@ -56,6 +76,7 @@ public:
         int limit = 500
     ) const;
     QVector<FolderUsageEntry> scanFolderUsage(const QString& rootPath, int limit = 50) const;
+    FolderUsageScan scanFolderUsageDetailed(const QString& rootPath, int folderLimit = 80, int fileLimit = 60000) const;
     QVector<EmptyFolderEntry> scanEmptyFolders(const QString& rootPath, int limit = 1000) const;
 
     FileOperationResult copyFiles(const QStringList& paths, const QString& targetDirectory) const;
@@ -74,6 +95,8 @@ public:
 
     static ManagedFileType detectType(const QString& path);
     static QString typeLabel(ManagedFileType type);
+    static QString normalizedExtension(const QString& path);
+    static QString extensionDescription(const QString& extension);
     static qint64 directorySize(const QString& path, int* fileCount = nullptr);
     static bool isReparsePoint(const QString& path);
 

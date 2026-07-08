@@ -134,27 +134,63 @@ QString adBlockHostsCommand(bool enable) {
         .arg(domainArray);
 }
 
-QString usageTreemapLabel(const FolderUsageEntry& entry) {
+QColor extensionUsageColor(const QString& extension) {
+    const QString key = extension.trimmed().toLower();
+    static const QMap<QString, QColor> fixedColors = {
+        {QStringLiteral(".dll"), QColor(QStringLiteral("#3f3cbb"))},
+        {QStringLiteral(".bin"), QColor(QStringLiteral("#a23a3a"))},
+        {QStringLiteral("(无扩展名)"), QColor(QStringLiteral("#3fa234"))},
+        {QStringLiteral(".exe"), QColor(QStringLiteral("#168f6e"))},
+        {QStringLiteral(".sys"), QColor(QStringLiteral("#00a6a6"))},
+        {QStringLiteral(".dat"), QColor(QStringLiteral("#7a0fa0"))},
+        {QStringLiteral(".log"), QColor(QStringLiteral("#a68a00"))},
+        {QStringLiteral(".msi"), QColor(QStringLiteral("#1f5f8f"))},
+        {QStringLiteral(".ttf"), QColor(QStringLiteral("#117a65"))},
+        {QStringLiteral(".ttc"), QColor(QStringLiteral("#0f9f7b"))},
+        {QStringLiteral(".pak"), QColor(QStringLiteral("#57a60f"))},
+        {QStringLiteral(".js"), QColor(QStringLiteral("#079154"))},
+        {QStringLiteral(".jpg"), QColor(QStringLiteral("#a0007d"))},
+        {QStringLiteral(".jpeg"), QColor(QStringLiteral("#a0007d"))},
+        {QStringLiteral(".png"), QColor(QStringLiteral("#0e78b8"))},
+        {QStringLiteral(".so"), QColor(QStringLiteral("#9a5b12"))},
+        {QStringLiteral(".db"), QColor(QStringLiteral("#4f4f4f"))},
+        {QStringLiteral(".7z"), QColor(QStringLiteral("#6f6f6f"))},
+        {QStringLiteral(".zip"), QColor(QStringLiteral("#8a7a00"))},
+        {QStringLiteral("(其他)"), QColor(QStringLiteral("#6b7280"))},
+    };
+    if (fixedColors.contains(key)) {
+        return fixedColors.value(key);
+    }
+
+    static const QVector<QColor> palette = {
+        QColor(QStringLiteral("#00c2d1")),
+        QColor(QStringLiteral("#c000a0")),
+        QColor(QStringLiteral("#1d4ed8")),
+        QColor(QStringLiteral("#84cc16")),
+        QColor(QStringLiteral("#dc2626")),
+        QColor(QStringLiteral("#facc15")),
+        QColor(QStringLiteral("#7c3aed")),
+        QColor(QStringLiteral("#14b8a6")),
+        QColor(QStringLiteral("#ea580c")),
+        QColor(QStringLiteral("#2563eb")),
+    };
+    uint seed = 0;
+    for (const QChar ch : key) {
+        seed = seed * 33 + ch.unicode();
+    }
+    return palette.at(static_cast<int>(seed % palette.size()));
+}
+
+QString fileUsageTreemapLabel(const FileUsageEntry& entry) {
     const QFileInfo info(entry.path);
-    const QString name = info.fileName().isEmpty() ? QDir::toNativeSeparators(entry.path) : info.fileName();
+    const QString name = info.exists() ? info.fileName() : entry.path;
+    if (entry.fileCount > 1) {
+        return QStringLiteral("%1\n%2\n%3 个文件").arg(name, CleanupEngine::formatSize(entry.sizeBytes)).arg(entry.fileCount);
+    }
     return QStringLiteral("%1\n%2").arg(name, CleanupEngine::formatSize(entry.sizeBytes));
 }
 
-QColor usageTreemapColor(int index) {
-    static const QVector<QColor> palette = {
-        QColor(QStringLiteral("#10b981")),
-        QColor(QStringLiteral("#0ea5e9")),
-        QColor(QStringLiteral("#f59e0b")),
-        QColor(QStringLiteral("#8b5cf6")),
-        QColor(QStringLiteral("#ef4444")),
-        QColor(QStringLiteral("#14b8a6")),
-        QColor(QStringLiteral("#64748b")),
-        QColor(QStringLiteral("#22c55e")),
-    };
-    return palette.at(index % palette.size());
-}
-
-qint64 usageTreemapTotal(const QVector<FolderUsageEntry>& entries, int first, int last) {
+qint64 fileUsageTreemapTotal(const QVector<FileUsageEntry>& entries, int first, int last) {
     qint64 total = 0;
     for (int i = first; i <= last; ++i) {
         total += qMax<qint64>(1, entries.at(i).sizeBytes);
@@ -162,21 +198,30 @@ qint64 usageTreemapTotal(const QVector<FolderUsageEntry>& entries, int first, in
     return total;
 }
 
-void drawUsageTreemap(QGraphicsScene* scene, const QVector<FolderUsageEntry>& entries, int first, int last, const QRectF& rect, int* colorIndex) {
+void drawFileUsageTreemap(QGraphicsScene* scene, const QVector<FileUsageEntry>& entries, int first, int last, const QRectF& rect) {
     if (!scene || first > last || rect.width() <= 1 || rect.height() <= 1) {
         return;
     }
 
-    if (first == last || rect.width() < 70 || rect.height() < 42) {
-        const FolderUsageEntry& entry = entries.at(first);
-        const QRectF cell = rect.adjusted(1, 1, -1, -1);
-        const QColor color = usageTreemapColor((*colorIndex)++);
-        auto* item = scene->addRect(cell, QPen(QColor(QStringLiteral("#ffffff")), 1), QBrush(color));
-        item->setToolTip(QStringLiteral("%1\n%2\n文件数: %3")
-            .arg(QDir::toNativeSeparators(entry.path), CleanupEngine::formatSize(entry.sizeBytes))
+    if (first == last || rect.width() < 6 || rect.height() < 6) {
+        FileUsageEntry entry = entries.at(first);
+        if (first != last) {
+            entry.path = QStringLiteral("文件合计");
+            entry.extension = QStringLiteral("(其他)");
+            entry.sizeBytes = fileUsageTreemapTotal(entries, first, last);
+            entry.fileCount = 0;
+            for (int i = first; i <= last; ++i) {
+                entry.fileCount += qMax(1, entries.at(i).fileCount);
+            }
+        }
+        const QRectF cell = rect.adjusted(0.5, 0.5, -0.5, -0.5);
+        const QColor color = extensionUsageColor(entry.extension);
+        auto* item = scene->addRect(cell, QPen(color.darker(155), 0), QBrush(color));
+        item->setToolTip(QStringLiteral("%1\n%2\n扩展名: %3\n文件数: %4")
+            .arg(QDir::toNativeSeparators(entry.path), CleanupEngine::formatSize(entry.sizeBytes), entry.extension)
             .arg(entry.fileCount));
-        if (cell.width() >= 92 && cell.height() >= 38) {
-            auto* text = scene->addText(usageTreemapLabel(entry));
+        if (cell.width() >= 110 && cell.height() >= 48) {
+            auto* text = scene->addText(fileUsageTreemapLabel(entry));
             text->setDefaultTextColor(Qt::white);
             text->setTextWidth(cell.width() - 8);
             text->setPos(cell.left() + 4, cell.top() + 4);
@@ -184,7 +229,7 @@ void drawUsageTreemap(QGraphicsScene* scene, const QVector<FolderUsageEntry>& en
         return;
     }
 
-    const qint64 total = usageTreemapTotal(entries, first, last);
+    const qint64 total = fileUsageTreemapTotal(entries, first, last);
     qint64 leftTotal = 0;
     int split = first;
     while (split < last) {
@@ -201,13 +246,13 @@ void drawUsageTreemap(QGraphicsScene* scene, const QVector<FolderUsageEntry>& en
     }
 
     if (rect.width() >= rect.height()) {
-        const qreal leftWidth = qMax<qreal>(24.0, rect.width() * static_cast<qreal>(leftTotal) / static_cast<qreal>(total));
-        drawUsageTreemap(scene, entries, first, split, QRectF(rect.left(), rect.top(), leftWidth, rect.height()), colorIndex);
-        drawUsageTreemap(scene, entries, split + 1, last, QRectF(rect.left() + leftWidth, rect.top(), rect.width() - leftWidth, rect.height()), colorIndex);
+        const qreal leftWidth = qBound<qreal>(1.0, rect.width() * static_cast<qreal>(leftTotal) / static_cast<qreal>(total), rect.width() - 1.0);
+        drawFileUsageTreemap(scene, entries, first, split, QRectF(rect.left(), rect.top(), leftWidth, rect.height()));
+        drawFileUsageTreemap(scene, entries, split + 1, last, QRectF(rect.left() + leftWidth, rect.top(), rect.width() - leftWidth, rect.height()));
     } else {
-        const qreal topHeight = qMax<qreal>(24.0, rect.height() * static_cast<qreal>(leftTotal) / static_cast<qreal>(total));
-        drawUsageTreemap(scene, entries, first, split, QRectF(rect.left(), rect.top(), rect.width(), topHeight), colorIndex);
-        drawUsageTreemap(scene, entries, split + 1, last, QRectF(rect.left(), rect.top() + topHeight, rect.width(), rect.height() - topHeight), colorIndex);
+        const qreal topHeight = qBound<qreal>(1.0, rect.height() * static_cast<qreal>(leftTotal) / static_cast<qreal>(total), rect.height() - 1.0);
+        drawFileUsageTreemap(scene, entries, first, split, QRectF(rect.left(), rect.top(), rect.width(), topHeight));
+        drawFileUsageTreemap(scene, entries, split + 1, last, QRectF(rect.left(), rect.top() + topHeight, rect.width(), rect.height() - topHeight));
     }
 }
 
@@ -675,34 +720,55 @@ QWidget* MainWindow::createFilePage() {
     auto* folderUsageLayout = new QVBoxLayout(folderUsagePage_);
     folderUsageLayout->setContentsMargins(0, 0, 0, 0);
     folderUsageLayout->setSpacing(8);
+    auto* usageTopSplitter = new QSplitter(Qt::Horizontal, folderUsagePage_);
+    usageTopSplitter->setChildrenCollapsible(false);
+
     folderUsageTree_ = new QTreeWidget(folderUsagePage_);
     folderUsageTree_->setObjectName(QStringLiteral("folderUsageTree"));
     folderUsageTree_->setColumnCount(4);
-    folderUsageTree_->setHeaderLabels({QStringLiteral("文件夹"), QStringLiteral("占用大小"), QStringLiteral("文件数"), QStringLiteral("占比")});
+    folderUsageTree_->setHeaderLabels({QStringLiteral("名称"), QStringLiteral("物理大小"), QStringLiteral("文件"), QStringLiteral("百分比")});
     folderUsageTree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     folderUsageTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     folderUsageTree_->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     folderUsageTree_->header()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
-    folderUsageLayout->addWidget(folderUsageTree_, 2);
+    usageTopSplitter->addWidget(folderUsageTree_);
 
-    auto* usageMapCard = new QFrame(folderUsagePage_);
-    usageMapCard->setObjectName(QStringLiteral("featureCard"));
-    auto* usageMapLayout = new QVBoxLayout(usageMapCard);
-    usageMapLayout->setContentsMargins(12, 10, 12, 12);
-    usageMapLayout->setSpacing(8);
-    auto* usageMapTitle = new QLabel(QStringLiteral("文件大小方格可视化"), usageMapCard);
-    usageMapTitle->setObjectName(QStringLiteral("sectionTitle"));
-    usageMapLayout->addWidget(usageMapTitle);
-    folderUsageMapScene_ = new QGraphicsScene(usageMapCard);
-    folderUsageMapView_ = new QGraphicsView(folderUsageMapScene_, usageMapCard);
+    folderExtensionTable_ = new QTableWidget(folderUsagePage_);
+    folderExtensionTable_->setObjectName(QStringLiteral("folderExtensionTable"));
+    folderExtensionTable_->setColumnCount(6);
+    folderExtensionTable_->setHorizontalHeaderLabels({
+        QStringLiteral("扩展名"),
+        QStringLiteral("颜色"),
+        QStringLiteral("描述"),
+        QStringLiteral("字节"),
+        QStringLiteral("% 字节"),
+        QStringLiteral("文件"),
+    });
+    folderExtensionTable_->setMinimumWidth(330);
+    folderExtensionTable_->setMaximumWidth(430);
+    folderExtensionTable_->verticalHeader()->setVisible(false);
+    folderExtensionTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    folderExtensionTable_->setAlternatingRowColors(true);
+    folderExtensionTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    folderExtensionTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    folderExtensionTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    folderExtensionTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    folderExtensionTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    folderExtensionTable_->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
+    usageTopSplitter->addWidget(folderExtensionTable_);
+    usageTopSplitter->setStretchFactor(0, 3);
+    usageTopSplitter->setStretchFactor(1, 2);
+    folderUsageLayout->addWidget(usageTopSplitter, 2);
+
+    folderUsageMapScene_ = new QGraphicsScene(folderUsagePage_);
+    folderUsageMapView_ = new QGraphicsView(folderUsageMapScene_, folderUsagePage_);
     folderUsageMapView_->setObjectName(QStringLiteral("folderUsageTreemap"));
-    folderUsageMapView_->setMinimumHeight(210);
-    folderUsageMapView_->setRenderHint(QPainter::Antialiasing, true);
+    folderUsageMapView_->setMinimumHeight(250);
+    folderUsageMapView_->setRenderHint(QPainter::Antialiasing, false);
     folderUsageMapView_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     folderUsageMapView_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     folderUsageMapView_->setFrameShape(QFrame::NoFrame);
-    usageMapLayout->addWidget(folderUsageMapView_, 1);
-    folderUsageLayout->addWidget(usageMapCard, 1);
+    folderUsageLayout->addWidget(folderUsageMapView_, 3);
 
     largeFileTable_ = new QTableWidget(page);
     largeFileTable_->setColumnCount(3);
@@ -901,9 +967,12 @@ void MainWindow::applyStyle() {
             padding: 4px;
         }
         QGraphicsView#folderUsageTreemap {
-            background: #f8fafc;
-            border: 1px solid #d1d5db;
-            border-radius: 6px;
+            background: #0f172a;
+            border: 1px solid #9ca3af;
+            border-radius: 2px;
+        }
+        QTreeWidget#folderUsageTree, QTableWidget#folderExtensionTable {
+            border-radius: 2px;
         }
         QTabWidget::pane { border: 1px solid #d1d5db; background: white; border-radius: 6px; }
         QTabBar::tab { padding: 8px 12px; margin-right: 2px; }
@@ -1810,14 +1879,14 @@ void MainWindow::chooseFileRoot() {
 void MainWindow::scanFolderUsage() {
     const QString root = fileRoot_.isEmpty() ? cDriveRoot() : fileRoot_;
     fileTabs_->setCurrentWidget(folderUsagePage_);
-    fileStatusLabel_->setText(QStringLiteral("正在扫描文件夹占用: %1").arg(QDir::toNativeSeparators(root)));
-    auto* watcher = new QFutureWatcher<QVector<FolderUsageEntry>>(this);
-    connect(watcher, &QFutureWatcher<QVector<FolderUsageEntry>>::finished, this, [this, watcher] {
+    fileStatusLabel_->setText(QStringLiteral("正在扫描文件夹占用和文件大小方格图: %1").arg(QDir::toNativeSeparators(root)));
+    auto* watcher = new QFutureWatcher<FolderUsageScan>(this);
+    connect(watcher, &QFutureWatcher<FolderUsageScan>::finished, this, [this, watcher] {
         populateFolderUsage(watcher->result());
         watcher->deleteLater();
     });
     watcher->setFuture(QtConcurrent::run([root] {
-        return FileManagementEngine().scanFolderUsage(root);
+        return FileManagementEngine().scanFolderUsageDetailed(root);
     }));
 }
 
@@ -1994,13 +2063,23 @@ void MainWindow::populateDuplicateFiles(const QVector<QVector<FileEntry>>& group
     fileStatusLabel_->setText(QStringLiteral("重复文件扫描完成: %1 组").arg(groups.size()));
 }
 
-void MainWindow::populateFolderUsage(const QVector<FolderUsageEntry>& entries) {
+void MainWindow::populateFolderUsage(const FolderUsageScan& scan) {
     folderUsageTree_->clear();
     qint64 total = 0;
-    for (const FolderUsageEntry& entry : entries) {
+    for (const ExtensionUsageEntry& entry : scan.extensions) {
         total += entry.sizeBytes;
     }
-    for (const FolderUsageEntry& entry : entries) {
+    if (total == 0) {
+        for (const FolderUsageEntry& entry : scan.folders) {
+            total += entry.sizeBytes;
+        }
+    }
+    int totalFileCount = 0;
+    for (const ExtensionUsageEntry& entry : scan.extensions) {
+        totalFileCount += entry.fileCount;
+    }
+
+    for (const FolderUsageEntry& entry : scan.folders) {
         auto* row = new QTreeWidgetItem(folderUsageTree_);
         row->setText(0, QDir::toNativeSeparators(entry.path));
         row->setText(1, CleanupEngine::formatSize(entry.sizeBytes));
@@ -2008,37 +2087,90 @@ void MainWindow::populateFolderUsage(const QVector<FolderUsageEntry>& entries) {
         row->setText(3, total > 0 ? QStringLiteral("%1%").arg(entry.sizeBytes * 100.0 / total, 0, 'f', 1) : QStringLiteral("--"));
         row->setData(0, Qt::UserRole, entry.path);
     }
-    populateFolderUsageTreemap(entries);
-    fileStatusLabel_->setText(QStringLiteral("文件夹占用扫描完成: %1 项").arg(entries.size()));
+    populateExtensionUsageTable(scan.extensions, total);
+    populateFolderUsageTreemap(scan.files, total, totalFileCount);
+    fileStatusLabel_->setText(QStringLiteral("文件夹占用扫描完成: %1 项，文件: %2 个，扩展名: %3 类")
+        .arg(scan.folders.size())
+        .arg(totalFileCount)
+        .arg(scan.extensions.size()));
 }
 
-void MainWindow::populateFolderUsageTreemap(const QVector<FolderUsageEntry>& entries) {
+void MainWindow::populateExtensionUsageTable(const QVector<ExtensionUsageEntry>& entries, qint64 totalBytes) {
+    if (!folderExtensionTable_) {
+        return;
+    }
+    folderExtensionTable_->setRowCount(0);
+    for (const ExtensionUsageEntry& entry : entries) {
+        const int row = folderExtensionTable_->rowCount();
+        folderExtensionTable_->insertRow(row);
+        folderExtensionTable_->setItem(row, 0, textItem(entry.extension));
+
+        auto* colorItem = textItem(QStringLiteral(" "));
+        colorItem->setBackground(QBrush(extensionUsageColor(entry.extension)));
+        folderExtensionTable_->setItem(row, 1, colorItem);
+
+        folderExtensionTable_->setItem(row, 2, textItem(entry.description));
+        folderExtensionTable_->setItem(row, 3, textItem(CleanupEngine::formatSize(entry.sizeBytes)));
+        folderExtensionTable_->setItem(row, 4, textItem(totalBytes > 0 ? QStringLiteral("%1%").arg(entry.sizeBytes * 100.0 / totalBytes, 0, 'f', 1) : QStringLiteral("--")));
+        folderExtensionTable_->setItem(row, 5, textItem(QString::number(entry.fileCount)));
+    }
+}
+
+void MainWindow::populateFolderUsageTreemap(const QVector<FileUsageEntry>& entries, qint64 totalBytes, int totalFileCount) {
     if (!folderUsageMapScene_ || !folderUsageMapView_) {
         return;
     }
     folderUsageMapScene_->clear();
-    folderUsageMapScene_->setSceneRect(0, 0, 1100, 260);
+    folderUsageMapScene_->setSceneRect(0, 0, 1280, 340);
 
-    QVector<FolderUsageEntry> visible;
-    for (const FolderUsageEntry& entry : entries) {
+    QVector<FileUsageEntry> visible;
+    qint64 visibleBytes = 0;
+    int visibleFileCount = 0;
+    for (const FileUsageEntry& entry : entries) {
         if (entry.sizeBytes > 0) {
             visible.push_back(entry);
+            visibleBytes += entry.sizeBytes;
+            visibleFileCount += qMax(1, entry.fileCount);
         }
     }
-    std::sort(visible.begin(), visible.end(), [](const FolderUsageEntry& a, const FolderUsageEntry& b) {
+    std::sort(visible.begin(), visible.end(), [](const FileUsageEntry& a, const FileUsageEntry& b) {
         return a.sizeBytes > b.sizeBytes;
     });
+    const int maxVisualFiles = 3600;
+    if (visible.size() > maxVisualFiles) {
+        qint64 keptBytes = 0;
+        int keptFileCount = 0;
+        for (int i = 0; i < maxVisualFiles; ++i) {
+            keptBytes += visible.at(i).sizeBytes;
+            keptFileCount += qMax(1, visible.at(i).fileCount);
+        }
+        visible.resize(maxVisualFiles);
+        visibleBytes = keptBytes;
+        visibleFileCount = keptFileCount;
+    }
+    const qint64 otherBytes = totalBytes > visibleBytes ? totalBytes - visibleBytes : 0;
+    const int otherFileCount = totalFileCount > visibleFileCount ? totalFileCount - visibleFileCount : 0;
+    if (otherBytes > 0) {
+        FileUsageEntry otherEntry;
+        otherEntry.path = QStringLiteral("其他文件");
+        otherEntry.extension = QStringLiteral("(其他)");
+        otherEntry.sizeBytes = otherBytes;
+        otherEntry.fileCount = qMax(1, otherFileCount);
+        visible.push_back(otherEntry);
+    }
 
     if (visible.isEmpty()) {
-        auto* text = folderUsageMapScene_->addText(QStringLiteral("扫描完成后，这里会按大小显示文件夹占用方格图。"));
+        auto* text = folderUsageMapScene_->addText(QStringLiteral("扫描完成后，这里会按大小显示文件方格图。"));
         text->setDefaultTextColor(QColor(QStringLiteral("#64748b")));
         text->setPos(12, 18);
         folderUsageMapView_->fitInView(folderUsageMapScene_->sceneRect(), Qt::KeepAspectRatio);
         return;
     }
 
-    int colorIndex = 0;
-    drawUsageTreemap(folderUsageMapScene_, visible, 0, visible.size() - 1, folderUsageMapScene_->sceneRect(), &colorIndex);
+    std::sort(visible.begin(), visible.end(), [](const FileUsageEntry& a, const FileUsageEntry& b) {
+        return a.sizeBytes > b.sizeBytes;
+    });
+    drawFileUsageTreemap(folderUsageMapScene_, visible, 0, visible.size() - 1, folderUsageMapScene_->sceneRect());
     folderUsageMapView_->fitInView(folderUsageMapScene_->sceneRect(), Qt::KeepAspectRatio);
 }
 

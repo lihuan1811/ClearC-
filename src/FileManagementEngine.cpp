@@ -5,6 +5,7 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QMap>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSet>
@@ -68,6 +69,16 @@ bool shouldSkipScanDirectory(const QFileInfo& info) {
     return skippedNames.contains(name) || FileManagementEngine::isReparsePoint(info.absoluteFilePath());
 }
 
+QString topLevelUsagePath(const QDir& rootDir, const QFileInfo& info) {
+    const QString relativePath = rootDir.relativeFilePath(info.absoluteFilePath());
+    if (relativePath.isEmpty() || relativePath.startsWith(QStringLiteral(".."))) {
+        return info.absoluteFilePath();
+    }
+    const int slash = relativePath.indexOf(QLatin1Char('/'));
+    const QString firstSegment = slash >= 0 ? relativePath.left(slash) : relativePath;
+    return QFileInfo(rootDir.filePath(firstSegment)).absoluteFilePath();
+}
+
 QString uniqueSiblingBackupPath(const QString& path) {
     const QFileInfo info(path);
     const QString stamp = QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMddHHmmss"));
@@ -120,31 +131,109 @@ QVector<ManagedFileEntry> FileManagementEngine::listFiles(const QString& rootPat
 }
 
 QVector<FolderUsageEntry> FileManagementEngine::scanFolderUsage(const QString& rootPath, int limit) const {
-    QVector<FolderUsageEntry> entries;
+    return scanFolderUsageDetailed(rootPath, limit, 0).folders;
+}
+
+FolderUsageScan FileManagementEngine::scanFolderUsageDetailed(const QString& rootPath, int folderLimit, int fileLimit) const {
+    FolderUsageScan scan;
     QDir root(rootPath);
     if (!root.exists()) {
-        return entries;
+        return scan;
     }
 
-    for (const QFileInfo& info : root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks)) {
-        if (shouldSkipScanDirectory(info)) {
+    root = QDir(QFileInfo(root.absolutePath()).absoluteFilePath());
+    const QString rootAbsolutePath = QFileInfo(root.absolutePath()).absoluteFilePath();
+    QMap<QString, FolderUsageEntry> topLevelUsage;
+    QMap<QString, ExtensionUsageEntry> extensionUsage;
+    QVector<QString> pending = {rootAbsolutePath};
+    const bool collectFileDetails = fileLimit != 0;
+
+    while (!pending.isEmpty()) {
+        const QString current = pending.takeLast();
+        const QFileInfo currentInfo(current);
+        if (currentInfo.absoluteFilePath() != rootAbsolutePath && shouldSkipScanDirectory(currentInfo)) {
             continue;
         }
-        int fileCount = 0;
-        FolderUsageEntry entry;
-        entry.path = info.absoluteFilePath();
-        entry.sizeBytes = directorySize(entry.path, &fileCount);
-        entry.fileCount = fileCount;
-        entries.push_back(entry);
+
+        const QFileInfoList entries = QDir(current).entryInfoList(
+            QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks
+        );
+        for (const QFileInfo& info : entries) {
+            if (info.isDir()) {
+                if (shouldSkipScanDirectory(info)) {
+                    continue;
+                }
+                if (currentInfo.absoluteFilePath() == rootAbsolutePath) {
+                    FolderUsageEntry& topEntry = topLevelUsage[info.absoluteFilePath()];
+                    if (topEntry.path.isEmpty()) {
+                        topEntry.path = info.absoluteFilePath();
+                    }
+                }
+                pending.push_back(info.absoluteFilePath());
+                continue;
+            }
+            if (!info.isFile()) {
+                continue;
+            }
+
+            const qint64 sizeBytes = info.size();
+            const QString topPath = topLevelUsagePath(root, info);
+            FolderUsageEntry& topEntry = topLevelUsage[topPath];
+            if (topEntry.path.isEmpty()) {
+                topEntry.path = topPath;
+            }
+            topEntry.sizeBytes += sizeBytes;
+            ++topEntry.fileCount;
+
+            if (!collectFileDetails) {
+                continue;
+            }
+
+            const QString extension = normalizedExtension(info.absoluteFilePath());
+            ExtensionUsageEntry& extensionEntry = extensionUsage[extension];
+            if (extensionEntry.extension.isEmpty()) {
+                extensionEntry.extension = extension;
+                extensionEntry.description = extensionDescription(extension);
+            }
+            extensionEntry.sizeBytes += sizeBytes;
+            ++extensionEntry.fileCount;
+
+            FileUsageEntry fileEntry;
+            fileEntry.path = info.absoluteFilePath();
+            fileEntry.extension = extension;
+            fileEntry.sizeBytes = sizeBytes;
+            fileEntry.fileCount = 1;
+            scan.files.push_back(fileEntry);
+        }
     }
 
-    std::sort(entries.begin(), entries.end(), [](const FolderUsageEntry& a, const FolderUsageEntry& b) {
+    for (auto it = topLevelUsage.cbegin(); it != topLevelUsage.cend(); ++it) {
+        scan.folders.push_back(it.value());
+    }
+    std::sort(scan.folders.begin(), scan.folders.end(), [](const FolderUsageEntry& a, const FolderUsageEntry& b) {
         return a.sizeBytes > b.sizeBytes;
     });
-    if (entries.size() > limit) {
-        entries.resize(limit);
+    if (folderLimit > 0 && scan.folders.size() > folderLimit) {
+        scan.folders.resize(folderLimit);
     }
-    return entries;
+
+    if (collectFileDetails) {
+        for (auto it = extensionUsage.cbegin(); it != extensionUsage.cend(); ++it) {
+            scan.extensions.push_back(it.value());
+        }
+        std::sort(scan.extensions.begin(), scan.extensions.end(), [](const ExtensionUsageEntry& a, const ExtensionUsageEntry& b) {
+            return a.sizeBytes > b.sizeBytes;
+        });
+
+        std::sort(scan.files.begin(), scan.files.end(), [](const FileUsageEntry& a, const FileUsageEntry& b) {
+            return a.sizeBytes > b.sizeBytes;
+        });
+        if (fileLimit > 0 && scan.files.size() > fileLimit) {
+            scan.files.resize(fileLimit);
+        }
+    }
+
+    return scan;
 }
 
 QVector<EmptyFolderEntry> FileManagementEngine::scanEmptyFolders(const QString& rootPath, int limit) const {
@@ -440,6 +529,47 @@ QString FileManagementEngine::typeLabel(ManagedFileType type) {
     default:
         return QStringLiteral("全部");
     }
+}
+
+QString FileManagementEngine::normalizedExtension(const QString& path) {
+    const QString suffix = QFileInfo(path).suffix().trimmed().toLower();
+    return suffix.isEmpty() ? QStringLiteral("(无扩展名)") : QStringLiteral(".%1").arg(suffix);
+}
+
+QString FileManagementEngine::extensionDescription(const QString& extension) {
+    const QString key = extension.trimmed().toLower();
+    if (key == QStringLiteral("(无扩展名)")) {
+        return QStringLiteral("无扩展名");
+    }
+    static const QMap<QString, QString> descriptions = {
+        {QStringLiteral(".dll"), QStringLiteral("应用程序扩展")},
+        {QStringLiteral(".bin"), QStringLiteral("BIN 文件")},
+        {QStringLiteral(".exe"), QStringLiteral("应用程序")},
+        {QStringLiteral(".sys"), QStringLiteral("系统文件")},
+        {QStringLiteral(".dat"), QStringLiteral("DAT 文件")},
+        {QStringLiteral(".log"), QStringLiteral("LOG 文件")},
+        {QStringLiteral(".msi"), QStringLiteral("Windows Installer 程序包")},
+        {QStringLiteral(".ttf"), QStringLiteral("TrueType 字体文件")},
+        {QStringLiteral(".ttc"), QStringLiteral("TrueType Collection 字体")},
+        {QStringLiteral(".pak"), QStringLiteral("PAK 文件")},
+        {QStringLiteral(".js"), QStringLiteral("JavaScript 文件")},
+        {QStringLiteral(".jpg"), QStringLiteral("美图看看")},
+        {QStringLiteral(".jpeg"), QStringLiteral("JPEG 图片")},
+        {QStringLiteral(".png"), QStringLiteral("PNG 文件")},
+        {QStringLiteral(".so"), QStringLiteral("SO 文件")},
+        {QStringLiteral(".db"), QStringLiteral("Data Base File")},
+        {QStringLiteral(".7z"), QStringLiteral("压缩存档文件")},
+        {QStringLiteral(".zip"), QStringLiteral("ZIP 压缩文件")},
+        {QStringLiteral(".pri"), QStringLiteral("PRI 文件")},
+        {QStringLiteral(".mun"), QStringLiteral("MUN 文件")},
+        {QStringLiteral(".tmp"), QStringLiteral("临时文件")},
+    };
+    if (descriptions.contains(key)) {
+        return descriptions.value(key);
+    }
+    return key.startsWith(QLatin1Char('.'))
+        ? QStringLiteral("%1 文件").arg(key.mid(1).toUpper())
+        : QStringLiteral("文件");
 }
 
 qint64 FileManagementEngine::directorySize(const QString& path, int* fileCount) {
