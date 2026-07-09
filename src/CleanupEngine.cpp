@@ -7,6 +7,7 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QProcess>
 #include <QRegularExpression>
 #include <QStandardPaths>
 #include <QTextStream>
@@ -233,6 +234,24 @@ CleanResult CleanupEngine::cleanEntriesDetailed(
             continue;
         }
 
+        if (entry.ruleId == QStringLiteral("recycle")) {
+            ++result.attemptedCount;
+            if (options.simulate) {
+                result.cleanedBytes += entry.size;
+                ++result.deletedCount;
+                continue;
+            }
+            QString error;
+            if (emptyRecycleBin(&error)) {
+                result.cleanedBytes += entry.size;
+                ++result.deletedCount;
+            } else {
+                ++result.skippedCount;
+                result.errors.push_back(error);
+            }
+            continue;
+        }
+
         if (entry.files.isEmpty()) {
             ++result.skippedCount;
             continue;
@@ -318,6 +337,8 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
     add(QStringLiteral("temp_files"), QStringLiteral("系统临时文件"),
         {envPath(QStringLiteral("TEMP"), winJoin({localAppData, QStringLiteral("Temp")})), winJoin({systemRoot, QStringLiteral("Temp")})},
         false, {QStringLiteral("*.tmp"), QStringLiteral("*.temp"), QStringLiteral("*.log"), QStringLiteral("*")});
+    add(QStringLiteral("recycle"), QStringLiteral("回收站"),
+        {winJoin({systemDrive, QStringLiteral("$Recycle.Bin")})}, false);
     add(QStringLiteral("chrome_cache"), QStringLiteral("Chrome 缓存"),
         {winJoin({localAppData, QStringLiteral("Google"), QStringLiteral("Chrome"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Cache")}),
          winJoin({localAppData, QStringLiteral("Google"), QStringLiteral("Chrome"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Code Cache")}),
@@ -357,9 +378,126 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
         {winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("EdgeUpdate")})}, false);
     add(QStringLiteral("prefetch"), QStringLiteral("Windows 预读取文件"),
         {winJoin({systemRoot, QStringLiteral("Prefetch")})}, false, {QStringLiteral("*.pf")});
+    add(QStringLiteral("system_logs"), QStringLiteral("系统日志"),
+        {winJoin({systemRoot, QStringLiteral("Logs")}), winJoin({systemRoot, QStringLiteral("debug")})},
+        false, {QStringLiteral("*.log"), QStringLiteral("*.etl"), QStringLiteral("*.dmp")});
+    add(QStringLiteral("thumbnails"), QStringLiteral("缩略图缓存"),
+        {winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("Explorer")})},
+        false, {QStringLiteral("thumbcache_*.db"), QStringLiteral("iconcache_*.db")});
+    add(QStringLiteral("old_windows"), QStringLiteral("旧 Windows 文件"),
+        {winJoin({systemDrive, QStringLiteral("Windows.old")}), winJoin({systemDrive, QStringLiteral("$Windows.~BT")}), winJoin({systemDrive, QStringLiteral("$Windows.~WS")})},
+        true);
+    add(QStringLiteral("error_reports"), QStringLiteral("Windows 错误报告"),
+        {winJoin({programData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("WER")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("WER")})},
+        false);
+    add(QStringLiteral("service_packs"), QStringLiteral("服务包备份"),
+        {winJoin({systemRoot, QStringLiteral("$NtServicePackUninstall$")}), winJoin({systemRoot, QStringLiteral("$hf_mig$")})},
+        true);
+    add(QStringLiteral("memory_dumps"), QStringLiteral("内存转储文件"),
+        {winJoin({systemRoot, QStringLiteral("Minidump")}), winJoin({systemRoot, QStringLiteral("MEMORY.DMP")}), winJoin({systemRoot, QStringLiteral("memory.dmp")})},
+        false);
+    add(QStringLiteral("font_cache"), QStringLiteral("字体缓存"),
+        {winJoin({localServiceLocal, QStringLiteral("FontCache")}), winJoin({systemRoot, QStringLiteral("System32"), QStringLiteral("FNTCACHE.DAT")})},
+        false);
+    add(QStringLiteral("disk_cleanup"), QStringLiteral("磁盘清理备份"),
+        {winJoin({systemRoot, QStringLiteral("System32"), QStringLiteral("LogFiles"), QStringLiteral("setupapi")}),
+         winJoin({systemRoot, QStringLiteral("Temp"), QStringLiteral("CheckSur")}),
+         winJoin({systemRoot, QStringLiteral("Logs"), QStringLiteral("CBS")})},
+        false);
     add(QStringLiteral("windows_update_download"), QStringLiteral("Windows 更新下载缓存"),
         {winJoin({systemRoot, QStringLiteral("SoftwareDistribution"), QStringLiteral("Download")}),
          winJoin({systemRoot, QStringLiteral("SoftwareDistribution"), QStringLiteral("DataStore")})},
+        false);
+    add(QStringLiteral("update_temp"), QStringLiteral("Windows 更新临时文件"),
+        {winJoin({systemRoot, QStringLiteral("SoftwareDistribution"), QStringLiteral("PostRebootEventCache")}),
+         winJoin({systemRoot, QStringLiteral("SoftwareDistribution"), QStringLiteral("Temp")}),
+         winJoin({systemRoot, QStringLiteral("WinSxS"), QStringLiteral("Temp")}),
+         winJoin({systemRoot, QStringLiteral("Temp"), QStringLiteral("TrustedInstaller")})},
+        false);
+    add(QStringLiteral("delivery_opt"), QStringLiteral("Windows 传递优化缓存"),
+        {winJoin({networkServiceLocal, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("DeliveryOptimization"), QStringLiteral("Cache")}),
+         winJoin({systemRoot, QStringLiteral("SoftwareDistribution"), QStringLiteral("DeliveryOptimization"), QStringLiteral("Cache")})},
+        false);
+    add(QStringLiteral("downloads"), QStringLiteral("下载文件夹"),
+        {winJoin({userProfile, QStringLiteral("Downloads")})}, true);
+    add(QStringLiteral("installer_cache"), QStringLiteral("安装程序缓存"),
+        {winJoin({systemRoot, QStringLiteral("Installer"), QStringLiteral("Temp")}),
+         winJoin({programData, QStringLiteral("Package Cache"), QStringLiteral("Temp")}),
+         winJoin({systemRoot, QStringLiteral("Downloaded Program Files"), QStringLiteral("Temp")}),
+         winJoin({localAppData, QStringLiteral("Package Cache")}),
+         winJoin({localAppData, QStringLiteral("Temp"), QStringLiteral("Downloaded Installations")}),
+         winJoin({systemRoot, QStringLiteral("Installer")})},
+        false, {QStringLiteral("*.tmp"), QStringLiteral("*.temp"), QStringLiteral("*.msi.cache"), QStringLiteral("*.msp.cache"), QStringLiteral("*.exe.cache"), QStringLiteral("*.log"), QStringLiteral("*.old")});
+    add(QStringLiteral("app_cache"), QStringLiteral("应用程序缓存"),
+        {winJoin({appData, QStringLiteral("Adobe"), QStringLiteral("Common")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Office"), QStringLiteral("Recent")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Office"), QStringLiteral("OTele")}),
+         winJoin({localAppData, QStringLiteral("Google"), QStringLiteral("DriveFS")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Teams"), QStringLiteral("Cache")}),
+         winJoin({appData, QStringLiteral("Slack"), QStringLiteral("Cache")}),
+         winJoin({appData, QStringLiteral("discord"), QStringLiteral("Cache")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("INetCache"), QStringLiteral("IE")})},
+        false);
+    add(QStringLiteral("media_cache"), QStringLiteral("媒体播放器缓存"),
+        {winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Media Player")}),
+         winJoin({appData, QStringLiteral("vlc"), QStringLiteral("art")}),
+         winJoin({localAppData, QStringLiteral("Spotify"), QStringLiteral("Storage")}),
+         winJoin({appData, QStringLiteral("Spotify"), QStringLiteral("cache")})},
+        false);
+    add(QStringLiteral("backup_temp"), QStringLiteral("备份临时文件"),
+        {winJoin({systemRoot, QStringLiteral("Temp"), QStringLiteral("WindowsBackup")}),
+         winJoin({systemRoot, QStringLiteral("Logs"), QStringLiteral("WindowsBackup")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("WindowsBackup")})},
+        false);
+    add(QStringLiteral("driver_backup"), QStringLiteral("驱动备份"),
+        {winJoin({systemRoot, QStringLiteral("inf"), QStringLiteral("OLD")}),
+         winJoin({systemRoot, QStringLiteral("System32"), QStringLiteral("DriverStore"), QStringLiteral("Temp")})},
+        false);
+    add(QStringLiteral("app_crash"), QStringLiteral("应用程序崩溃转储"),
+        {winJoin({programData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("WER"), QStringLiteral("ReportArchive")}),
+         winJoin({programData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("WER"), QStringLiteral("ReportQueue")}),
+         winJoin({localAppData, QStringLiteral("CrashDumps")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("WER"), QStringLiteral("ReportArchive")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("WER"), QStringLiteral("ReportQueue")})},
+        false);
+    add(QStringLiteral("app_logs"), QStringLiteral("应用程序日志"),
+        {winJoin({appData, QStringLiteral("Microsoft"), QStringLiteral("Teams"), QStringLiteral("logs.txt")}),
+         winJoin({appData, QStringLiteral("Microsoft"), QStringLiteral("Teams"), QStringLiteral("logs")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Office")}),
+         winJoin({appData, QStringLiteral("Slack"), QStringLiteral("logs")}),
+         winJoin({appData, QStringLiteral("discord"), QStringLiteral("logs")})},
+        false, {QStringLiteral("*.log"), QStringLiteral("logs.txt")});
+    add(QStringLiteral("recent_items"), QStringLiteral("最近使用记录"),
+        {winJoin({appData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("Recent")}),
+         winJoin({appData, QStringLiteral("Microsoft"), QStringLiteral("Office"), QStringLiteral("Recent")})},
+        true, {QStringLiteral("*.lnk"), QStringLiteral("*.automaticDestinations-ms"), QStringLiteral("*.customDestinations-ms")}, {}, false, true, true);
+    add(QStringLiteral("notification"), QStringLiteral("Windows 通知缓存"),
+        {winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("Notifications")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("ActionCenterCache")})},
+        false);
+    add(QStringLiteral("dns_cache"), QStringLiteral("DNS 缓存文件"),
+        {winJoin({systemRoot, QStringLiteral("System32"), QStringLiteral("dnsrslvr.log")}),
+         winJoin({systemRoot, QStringLiteral("System32"), QStringLiteral("dns"), QStringLiteral("cache.dns")})},
+        true);
+    add(QStringLiteral("printer_temp"), QStringLiteral("打印机临时文件"),
+        {winJoin({systemRoot, QStringLiteral("System32"), QStringLiteral("spool"), QStringLiteral("PRINTERS")}),
+         winJoin({systemRoot, QStringLiteral("System32"), QStringLiteral("spool"), QStringLiteral("SERVERS")}),
+         winJoin({systemRoot, QStringLiteral("System32"), QStringLiteral("spool"), QStringLiteral("drivers"), QStringLiteral("color")})},
+        false);
+    add(QStringLiteral("device_temp"), QStringLiteral("设备安装临时文件"),
+        {winJoin({systemRoot, QStringLiteral("INF"), QStringLiteral("setupapi.dev.log")}),
+         winJoin({systemRoot, QStringLiteral("INF"), QStringLiteral("setupapi.log")}),
+         winJoin({systemRoot, QStringLiteral("System32"), QStringLiteral("LogFiles"), QStringLiteral("setupapi")})},
+        false);
+    add(QStringLiteral("store_cache"), QStringLiteral("Windows Store 缓存"),
+        {winJoin({localAppData, QStringLiteral("Packages"), QStringLiteral("Microsoft.WindowsStore_8wekyb3d8bbwe"), QStringLiteral("LocalCache")}),
+         winJoin({localAppData, QStringLiteral("Packages"), QStringLiteral("Microsoft.WindowsStore_8wekyb3d8bbwe"), QStringLiteral("LocalState")}),
+         winJoin({localAppData, QStringLiteral("Packages"), QStringLiteral("Microsoft.WindowsStore_8wekyb3d8bbwe"), QStringLiteral("TempState")})},
+        false);
+    add(QStringLiteral("onedrive_cache"), QStringLiteral("OneDrive 缓存"),
+        {winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("OneDrive"), QStringLiteral("logs")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("OneDrive"), QStringLiteral("settings"), QStringLiteral("Personal"), QStringLiteral("logs")})},
         false);
     add(QStringLiteral("edge_webview_cache"), QStringLiteral("Edge/WebView 缓存"),
         {winJoin({localAppData, QStringLiteral("GameViewer"), QStringLiteral("webviewcache"), QStringLiteral("EBWebView")}),
@@ -377,8 +515,13 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Login Data")}),
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Network")}),
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Preferences")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Secure Preferences")}),
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Sessions")}),
-         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Session Storage")})},
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Session Storage")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Shortcuts")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Sync Data")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Visited Links")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("Default"), QStringLiteral("Web Data")})},
         true, {}, {}, false, true, true);
     add(QStringLiteral("edge_component_updates"), QStringLiteral("Edge 组件更新残留"),
         {winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Edge"), QStringLiteral("User Data"), QStringLiteral("EADPData Component")}),
@@ -408,11 +551,13 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
         {winJoin({localLow, QStringLiteral("Microsoft"), QStringLiteral("CryptnetUrlCache"), QStringLiteral("Content")}),
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Internet Explorer"), QStringLiteral("DOMStore")}),
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Internet Explorer"), QStringLiteral("CacheStorage")}),
+         winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("AppCache")}),
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("INetCache")}),
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("INetCookies")}),
          winJoin({localAppData, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("WebCache")}),
          winJoin({systemProfileLocal, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("INetCache")}),
-         winJoin({systemProfileLocal, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("WebCache")})},
+         winJoin({systemProfileLocal, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("WebCache")}),
+         winJoin({systemProfileLocal, QStringLiteral("Low"), QStringLiteral("Microsoft"), QStringLiteral("CryptnetUrlCache")})},
         true);
     add(QStringLiteral("system_event_logs"), QStringLiteral("系统事件日志"),
         {winJoin({systemRoot, QStringLiteral("System32"), QStringLiteral("winevt"), QStringLiteral("Logs")})},
@@ -429,6 +574,11 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
             QStringLiteral("\\microsoft.windows.photos_"),
             QStringLiteral("\\microsoft.skypeapp_"),
         });
+    add(QStringLiteral("search_index"), QStringLiteral("搜索索引临时文件"),
+        {winJoin({programData, QStringLiteral("Microsoft"), QStringLiteral("Search"), QStringLiteral("Data"), QStringLiteral("Temp")}),
+         winJoin({programData, QStringLiteral("Microsoft"), QStringLiteral("Search"), QStringLiteral("Data"), QStringLiteral("Applications"), QStringLiteral("Windows")}),
+         winJoin({localServiceLocal, QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("Search")})},
+        false, {QStringLiteral("*.tmp"), QStringLiteral("*.old"), QStringLiteral("*.bak"), QStringLiteral("*.log")});
     add(QStringLiteral("third_party_app_logs"), QStringLiteral("第三方程序日志"),
         {winJoin({programData, QStringLiteral("NVIDIA Corporation")}),
          winJoin({programData, QStringLiteral("NVIDIA")}),
@@ -440,8 +590,11 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
          winJoin({systemRoot, QStringLiteral("PFRO.log")}),
          winJoin({systemRoot, QStringLiteral("setupact.log")}),
          winJoin({systemRoot, QStringLiteral("setuperr.log")}),
+         winJoin({systemRoot, QStringLiteral("Microsoft.NET"), QStringLiteral("Framework64"), QStringLiteral("v4.0.30319"), QStringLiteral("ngen.log")}),
+         winJoin({systemRoot, QStringLiteral("Microsoft.NET"), QStringLiteral("Framework"), QStringLiteral("v4.0.30319"), QStringLiteral("ngen.log")}),
          winJoin({systemRoot, QStringLiteral("Performance"), QStringLiteral("WinSAT")}),
          winJoin({systemRoot, QStringLiteral("System32"), QStringLiteral("MsDtc"), QStringLiteral("MSDTC.LOG")}),
+         winJoin({systemRoot, QStringLiteral("System32"), QStringLiteral("config"), QStringLiteral("BCD-Template.LOG")}),
          winJoin({systemRoot, QStringLiteral("System32"), QStringLiteral("sru")})},
         true, {QStringLiteral("*.log"), QStringLiteral("*.LOG")});
     add(QStringLiteral("sleepstudy_wdi_traces"), QStringLiteral("SleepStudy/WDI 跟踪"),
@@ -529,18 +682,42 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
          systemDrive + QStringLiteral("\\")},
         true, {QStringLiteral("*.exe"), QStringLiteral("*.msi"), QStringLiteral("*.zip"), QStringLiteral("*.rar"), QStringLiteral("*.7z"), QStringLiteral("*.iso")}, {}, false, true);
     add(QStringLiteral("wechat_special_clean"), QStringLiteral("微信专清"),
-        {winJoin({userProfile, QStringLiteral("Documents"), QStringLiteral("WeChat Files")}),
-         winJoin({userProfile, QStringLiteral("Documents"), QStringLiteral("xwechat_files")}),
-         winJoin({userProfile, QStringLiteral("Documents"), QStringLiteral("WXWork")}),
-         winJoin({localAppData, QStringLiteral("Tencent"), QStringLiteral("WeChat")}),
-         winJoin({appData, QStringLiteral("Tencent"), QStringLiteral("WeChat")})},
-        false, {}, {QStringLiteral("FileStorage"), QStringLiteral("Cache"), QStringLiteral("Temp")});
+        accountCacheDirs(
+            {winJoin({userProfile, QStringLiteral("Documents"), QStringLiteral("WeChat Files")}),
+             winJoin({userProfile, QStringLiteral("Documents"), QStringLiteral("xwechat_files")}),
+             winJoin({userProfile, QStringLiteral("Documents"), QStringLiteral("WXWork")}),
+             winJoin({localAppData, QStringLiteral("Tencent"), QStringLiteral("WeChat")}),
+             winJoin({appData, QStringLiteral("Tencent"), QStringLiteral("WeChat")})},
+            {QStringLiteral("FileStorage\\Cache"),
+             QStringLiteral("FileStorage\\Temp"),
+             QStringLiteral("FileStorage\\Image"),
+             QStringLiteral("FileStorage\\Video"),
+             QStringLiteral("FileStorage\\File"),
+             QStringLiteral("FileStorage\\Applet"),
+             QStringLiteral("Cache"),
+             QStringLiteral("cache")}
+        ),
+        false);
     add(QStringLiteral("qq_special_clean"), QStringLiteral("QQ专清"),
-        {winJoin({userProfile, QStringLiteral("Documents"), QStringLiteral("Tencent Files")}),
-         winJoin({appData, QStringLiteral("Tencent"), QStringLiteral("QQ")}),
-         winJoin({localAppData, QStringLiteral("Tencent"), QStringLiteral("QQ")}),
-         winJoin({localAppData, QStringLiteral("Tencent"), QStringLiteral("QQNT")})},
-        false, {}, {QStringLiteral("Image"), QStringLiteral("Video"), QStringLiteral("FileRecv"), QStringLiteral("Cache"), QStringLiteral("Temp")});
+        accountCacheDirs(
+            {winJoin({userProfile, QStringLiteral("Documents"), QStringLiteral("Tencent Files")}),
+             winJoin({appData, QStringLiteral("Tencent"), QStringLiteral("QQ")}),
+             winJoin({localAppData, QStringLiteral("Tencent"), QStringLiteral("QQ")}),
+             winJoin({localAppData, QStringLiteral("Tencent"), QStringLiteral("QQNT")})},
+            {QStringLiteral("Image"),
+             QStringLiteral("image"),
+             QStringLiteral("Video"),
+             QStringLiteral("video"),
+             QStringLiteral("ShortVideo"),
+             QStringLiteral("shortvideo"),
+             QStringLiteral("FileRecv"),
+             QStringLiteral("filerecv"),
+             QStringLiteral("Cache"),
+             QStringLiteral("cache"),
+             QStringLiteral("Temp"),
+             QStringLiteral("temp")}
+        ),
+        false);
 
     return rules;
 }
@@ -749,6 +926,52 @@ QString CleanupEngine::winJoin(std::initializer_list<QString> parts) {
     return joined;
 }
 
+QStringList CleanupEngine::accountCacheDirs(const QStringList& baseDirs, const QStringList& subDirs) {
+    QStringList resolved;
+    QSet<QString> seen;
+
+    auto appendIfDir = [&resolved, &seen](const QString& candidate) {
+        if (candidate.isEmpty()) {
+            return;
+        }
+        const QFileInfo info(candidate);
+        if (!info.isDir()) {
+            return;
+        }
+        const QString path = QDir::toNativeSeparators(info.absoluteFilePath());
+        const QString key = path.toLower();
+        if (seen.contains(key)) {
+            return;
+        }
+        seen.insert(key);
+        resolved.push_back(path);
+    };
+
+    auto childPath = [](const QString& base, const QString& sub) {
+        return QDir::toNativeSeparators(QDir(base).filePath(QDir::fromNativeSeparators(sub)));
+    };
+
+    for (const QString& base : baseDirs) {
+        const QFileInfo baseInfo(base);
+        if (!baseInfo.isDir()) {
+            continue;
+        }
+
+        for (const QString& sub : subDirs) {
+            appendIfDir(childPath(baseInfo.absoluteFilePath(), sub));
+        }
+
+        const QFileInfoList accounts = QDir(baseInfo.absoluteFilePath()).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks);
+        for (const QFileInfo& account : accounts) {
+            for (const QString& sub : subDirs) {
+                appendIfDir(childPath(account.absoluteFilePath(), sub));
+            }
+        }
+    }
+
+    return resolved;
+}
+
 bool CleanupEngine::pathMatches(const QString& path, const CleanupRule& rule) {
     const QString normalized = QDir::toNativeSeparators(path);
     if (!containsAnyMarker(normalized, rule.pathContains)) {
@@ -841,6 +1064,40 @@ void CleanupEngine::collectRuleFiles(
             progress(path, *count);
         }
     }
+}
+
+bool CleanupEngine::emptyRecycleBin(QString* error) {
+#ifdef Q_OS_WIN
+    QProcess process;
+    process.start(
+        QStringLiteral("powershell"),
+        {
+            QStringLiteral("-NoProfile"),
+            QStringLiteral("-Command"),
+            QStringLiteral("Clear-RecycleBin -DriveLetter C -Force -ErrorAction SilentlyContinue")
+        }
+    );
+    if (!process.waitForFinished(30000)) {
+        process.kill();
+        if (error) {
+            *error = QStringLiteral("清空回收站超时。");
+        }
+        return false;
+    }
+    if (process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0) {
+        return true;
+    }
+    if (error) {
+        const QString stderrText = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
+        *error = stderrText.isEmpty()
+            ? QStringLiteral("清空回收站失败，退出码: %1").arg(process.exitCode())
+            : stderrText;
+    }
+    return false;
+#else
+    Q_UNUSED(error);
+    return true;
+#endif
 }
 
 bool CleanupEngine::backupFile(const QString& source, const QString& backupRoot, QString* error) {

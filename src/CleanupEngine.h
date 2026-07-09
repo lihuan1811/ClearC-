@@ -145,6 +145,7 @@ public:
 private:
     static QString envPath(const QString& name, const QString& fallback);
     static QString winJoin(std::initializer_list<QString> parts);
+    static QStringList accountCacheDirs(const QStringList& baseDirs, const QStringList& subDirs);
     static bool ruleMatchesScanScope(const CleanupRule& rule, ScanScope scope);
     static bool pathMatches(const QString& path, const CleanupRule& rule);
     static qint64 fileSize(const QString& path);
@@ -157,6 +158,7 @@ private:
         const ProgressCallback& progress,
         int* count
     );
+    static bool emptyRecycleBin(QString* error = nullptr);
     static bool backupFile(const QString& source, const QString& backupRoot, QString* error = nullptr);
     static QString defaultBackupRoot();
 };
