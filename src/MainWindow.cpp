@@ -2003,6 +2003,7 @@ void MainWindow::migrateSelectedFolders() {
 
     QStringList errors;
     int success = 0;
+    int failed = 0;
     for (int row = 0; row < migrationTable_->rowCount(); ++row) {
         QTableWidgetItem* check = migrationTable_->item(row, 0);
         if (!check || check->checkState() != Qt::Checked) {
@@ -2017,11 +2018,12 @@ void MainWindow::migrateSelectedFolders() {
         if (result.errors.isEmpty()) {
             ++success;
         } else {
+            ++failed;
             errors.append(result.errors);
         }
     }
     refreshMigrationFolders();
-    const QString summary = QStringLiteral("迁移完成: %1 项，失败: %2 项。").arg(success).arg(errors.size());
+    const QString summary = QStringLiteral("迁移完成: %1 项，失败: %2 项。").arg(success).arg(failed);
     fileStatusLabel_->setText(summary);
     if (errors.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("文件迁移"), summary);
@@ -2048,6 +2050,7 @@ void MainWindow::restoreSelectedFolders() {
 
     QStringList errors;
     int success = 0;
+    int failed = 0;
     for (int row = 0; row < migrationTable_->rowCount(); ++row) {
         QTableWidgetItem* check = migrationTable_->item(row, 0);
         if (!check || check->checkState() != Qt::Checked) {
@@ -2058,11 +2061,12 @@ void MainWindow::restoreSelectedFolders() {
         if (result.errors.isEmpty()) {
             ++success;
         } else {
+            ++failed;
             errors.append(result.errors);
         }
     }
     refreshMigrationFolders();
-    const QString summary = QStringLiteral("还原完成: %1 项，失败: %2 项。").arg(success).arg(errors.size());
+    const QString summary = QStringLiteral("还原完成: %1 项，失败: %2 项。").arg(success).arg(failed);
     fileStatusLabel_->setText(summary);
     if (errors.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("还原选中"), summary);

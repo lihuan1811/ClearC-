@@ -392,18 +392,31 @@ def test_cpp_gpu_optimization_module_detects_supported_gpu_actions():
 
 def test_file_migration_handles_cross_volume_and_junction_restore_safely():
     source = read(SRC / "FileManagementEngine.cpp")
+    header = read(SRC / "FileManagementEngine.h")
 
     for token in [
         "copyDirectoryContents",
         "removeDirectoryTree",
+        "mergeMoveDirectoryContents",
+        "movePathWithFallback",
+        "rollbackMigration",
+        "removeEmptyDirectory",
+        "ensureSupportsJunction",
+        "QStorageInfo",
         "junctionTarget",
         "removeJunction",
         "GetFinalPathNameByHandleW",
         "RemoveDirectoryW",
+        "目标磁盘为 %1 格式，不支持连接点",
+        "请勾选“迁移时移动原文件”",
+        "本程序正位于“%1”内，运行中无法移动",
+        "创建连接点失败",
     ]:
-        assert token in source
+        assert token in header + source
 
     assert "copyOrMove({folder.path}, targetRoot, true)" not in source
+    assert "copyDirectoryContents(folder.path, target" not in source
+    assert "copyDirectoryContents(target, folder.path" not in source
     assert "QDir(folder.path).removeRecursively();" not in source
 
 

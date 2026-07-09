@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QFileInfo>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -105,7 +106,12 @@ private:
     FileOperationResult runCommand(const QString& executable, const QStringList& arguments) const;
     MigrationFolder migrationFolderByKey(const QString& folderKey) const;
     bool copyDirectoryContents(const QString& sourceDirectory, const QString& targetDirectory, FileOperationResult* result) const;
+    bool mergeMoveDirectoryContents(const QString& sourceDirectory, const QString& targetDirectory, const QString& folderName, FileOperationResult* result) const;
+    bool movePathWithFallback(const QFileInfo& sourceInfo, const QString& targetPath, const QString& folderName, FileOperationResult* result) const;
     bool removeDirectoryTree(const QString& path, FileOperationResult* result) const;
+    bool removeEmptyDirectory(const QString& path, FileOperationResult* result) const;
+    bool rollbackMigration(const QString& targetDirectory, const QString& sourceDirectory) const;
+    bool ensureSupportsJunction(const QString& targetRoot, const QString& folderName, FileOperationResult* result) const;
     QString junctionTarget(const QString& path) const;
     bool removeJunction(const QString& path, FileOperationResult* result) const;
 };

@@ -1,6 +1,6 @@
 #include "FileManagementEngine.h"
 
-#include <QDateTime>
+#include <QCoreApplication>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -10,9 +10,12 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QStandardPaths>
+#include <QStorageInfo>
 
 #include <algorithm>
+#include <filesystem>
 #include <string>
+#include <system_error>
 
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
@@ -79,19 +82,26 @@ QString topLevelUsagePath(const QDir& rootDir, const QFileInfo& info) {
     return QFileInfo(rootDir.filePath(firstSegment)).absoluteFilePath();
 }
 
-QString uniqueSiblingBackupPath(const QString& path) {
+QString uniqueTargetPath(const QString& path) {
     const QFileInfo info(path);
-    const QString stamp = QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMddHHmmss"));
-    const QString base = QDir(info.absolutePath()).filePath(
-        QStringLiteral("%1.c_diskglow_original_%2").arg(info.fileName(), stamp)
-    );
-    QString candidate = base;
+    const QString directory = info.absolutePath();
+    const QString fileName = info.fileName();
+    const int dot = fileName.lastIndexOf(QLatin1Char('.'));
+    const QString stem = dot > 0 ? fileName.left(dot) : fileName;
+    const QString extension = dot > 0 ? fileName.mid(dot) : QString();
+    QString candidate;
     int counter = 1;
-    while (QFileInfo::exists(candidate)) {
-        candidate = QStringLiteral("%1_%2").arg(base).arg(counter);
+    do {
+        candidate = QDir(directory).filePath(QStringLiteral("%1_%2%3").arg(stem).arg(counter).arg(extension));
         ++counter;
-    }
+    } while (QFileInfo::exists(candidate));
     return candidate;
+}
+
+bool directoryHasEntries(const QString& path) {
+    return !QDir(path).entryInfoList(
+        QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot
+    ).isEmpty();
 }
 
 #ifdef Q_OS_WIN
@@ -399,9 +409,23 @@ FileOperationResult FileManagementEngine::migratePersonalFolder(const QString& f
         return result;
     }
 
-    const QString target = QDir(targetRoot).filePath(folder.subName);
+    const QString applicationPath = QFileInfo(QCoreApplication::applicationFilePath()).absoluteFilePath();
+    if (!applicationPath.isEmpty() && isSameOrChild(applicationPath, folder.path)) {
+        result.errors.push_back(QStringLiteral("本程序正位于“%1”内，运行中无法移动。请先把程序移动到其它磁盘后再迁移该文件夹。").arg(folder.name));
+        return result;
+    }
+
+    const QString targetRootPath = QFileInfo(targetRoot).absoluteFilePath();
+    const QString target = QDir(targetRootPath).filePath(folder.subName);
     if (isSameOrChild(target, folder.path)) {
         result.errors.push_back(QStringLiteral("目标目录不能位于原目录内部: %1").arg(target));
+        return result;
+    }
+    if (!QDir().mkpath(targetRootPath)) {
+        result.errors.push_back(QStringLiteral("创建目标根目录失败: %1").arg(targetRootPath));
+        return result;
+    }
+    if (!ensureSupportsJunction(targetRootPath, folder.name, &result)) {
         return result;
     }
     if (!QDir().mkpath(target)) {
@@ -410,26 +434,32 @@ FileOperationResult FileManagementEngine::migratePersonalFolder(const QString& f
     }
 
     const QFileInfo sourceInfo(folder.path);
-    if (sourceInfo.exists()) {
+    const bool sourceExisted = sourceInfo.exists();
+    bool moved = false;
+    if (sourceExisted) {
         if (!sourceInfo.isDir()) {
             result.errors.push_back(QStringLiteral("原路径不是目录: %1").arg(folder.path));
             return result;
         }
-        if (!copyDirectoryContents(folder.path, target, &result)) {
-            return result;
+        if (moveFiles) {
+            if (!mergeMoveDirectoryContents(folder.path, target, folder.name, &result)) {
+                rollbackMigration(target, folder.path);
+                return result;
+            }
+            moved = true;
+        } else {
+            if (directoryHasEntries(folder.path)) {
+                result.errors.push_back(QStringLiteral("“%1”内还有文件，请勾选“迁移时移动原文件”后再迁移。").arg(folder.name));
+                return result;
+            }
         }
 
-        if (moveFiles) {
-            if (!removeDirectoryTree(folder.path, &result)) {
-                return result;
+        if (!removeEmptyDirectory(folder.path, &result)) {
+            if (moved) {
+                rollbackMigration(target, folder.path);
             }
-        } else {
-            const QString preservedPath = uniqueSiblingBackupPath(folder.path);
-            if (!QDir().rename(folder.path, preservedPath)) {
-                result.errors.push_back(QStringLiteral("保留原目录备份失败: %1 -> %2").arg(folder.path, preservedPath));
-                return result;
-            }
-            result.output += QStringLiteral("原目录已保留为: %1\n").arg(QDir::toNativeSeparators(preservedPath));
+            result.errors.push_back(QStringLiteral("“%1”中可能有文件正被占用，无法完成迁移。请关闭相关程序后重试。").arg(folder.name));
+            return result;
         }
     } else {
         QDir().mkpath(QFileInfo(folder.path).absolutePath());
@@ -438,9 +468,13 @@ FileOperationResult FileManagementEngine::migratePersonalFolder(const QString& f
     FileOperationResult junction = createJunction(folder.path, target);
     if (!junction.errors.isEmpty()) {
         result.errors.append(junction.errors);
+        if (sourceExisted || moved) {
+            rollbackMigration(target, folder.path);
+        }
         return result;
     }
     result.affectedPaths.append(junction.affectedPaths);
+    result.affectedPaths.push_back(target);
     result.affectedPaths.push_back(folder.path);
     return result;
 }
@@ -468,11 +502,11 @@ FileOperationResult FileManagementEngine::restorePersonalFolder(const QString& f
         result.errors.push_back(QStringLiteral("创建还原目录失败: %1").arg(folder.path));
         return result;
     }
-    if (!target.isEmpty() && QFileInfo::exists(target)) {
-        if (!copyDirectoryContents(target, folder.path, &result)) {
+    if (!target.isEmpty() && QFileInfo::exists(target) && QFileInfo(target).absoluteFilePath() != QFileInfo(folder.path).absoluteFilePath()) {
+        if (!mergeMoveDirectoryContents(target, folder.path, folder.name, &result)) {
             return result;
         }
-        if (!removeDirectoryTree(target, &result)) {
+        if (!removeEmptyDirectory(target, &result)) {
             return result;
         }
     }
@@ -482,13 +516,32 @@ FileOperationResult FileManagementEngine::restorePersonalFolder(const QString& f
 
 FileOperationResult FileManagementEngine::createJunction(const QString& source, const QString& target) const {
 #ifdef Q_OS_WIN
-    return runCommand(QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("mklink"), QStringLiteral("/J"), source, target});
+    FileOperationResult result = runCommand(QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("mklink"), QStringLiteral("/J"), source, target});
+    if (!result.errors.isEmpty()) {
+        const QString detail = result.output.trimmed().isEmpty() ? result.errors.join(QStringLiteral("\n")) : result.output.trimmed();
+        QString hint;
+        const QString lower = detail.toLower();
+        if (detail.contains(QStringLiteral("拒绝访问")) || lower.contains(QStringLiteral("denied"))) {
+            hint = QStringLiteral("（请尝试以管理员身份运行本程序）");
+        } else if (detail.contains(QStringLiteral("已存在")) || lower.contains(QStringLiteral("exist"))) {
+            hint = QStringLiteral("（原位置仍存在同名文件夹，请手动清理后重试）");
+        }
+        result.errors.clear();
+        result.errors.push_back(QStringLiteral("创建连接点失败: %1%2").arg(detail.isEmpty() ? QStringLiteral("未知错误") : detail, hint));
+    }
+    return result;
 #else
     FileOperationResult result;
-    if (QFile::link(target, source)) {
+    std::error_code error;
+    std::filesystem::create_directory_symlink(
+        std::filesystem::path(target.toStdString()),
+        std::filesystem::path(source.toStdString()),
+        error
+    );
+    if (!error) {
         result.affectedPaths.push_back(source);
     } else {
-        result.errors.push_back(QStringLiteral("创建连接失败: %1 -> %2").arg(source, target));
+        result.errors.push_back(QStringLiteral("创建连接失败: %1 -> %2，%3").arg(source, target, QString::fromStdString(error.message())));
     }
     return result;
 #endif
@@ -639,7 +692,11 @@ bool FileManagementEngine::copyDirectoryContents(const QString& sourceDirectory,
     }
 
     bool ok = true;
-    QDirIterator iterator(sourceDirectory, QDir::AllEntries | QDir::NoDotAndDotDot | QDir::NoSymLinks, QDirIterator::Subdirectories);
+    QDirIterator iterator(
+        sourceDirectory,
+        QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot | QDir::NoSymLinks,
+        QDirIterator::Subdirectories
+    );
     while (iterator.hasNext()) {
         const QString sourcePath = iterator.next();
         const QFileInfo info = iterator.fileInfo();
@@ -684,6 +741,108 @@ bool FileManagementEngine::copyDirectoryContents(const QString& sourceDirectory,
     return ok;
 }
 
+bool FileManagementEngine::mergeMoveDirectoryContents(const QString& sourceDirectory, const QString& targetDirectory, const QString& folderName, FileOperationResult* result) const {
+    const QFileInfo sourceInfo(sourceDirectory);
+    if (!sourceInfo.exists() || !sourceInfo.isDir()) {
+        if (result) {
+            result->errors.push_back(QStringLiteral("源目录不存在: %1").arg(sourceDirectory));
+        }
+        return false;
+    }
+    if (isSameOrChild(targetDirectory, sourceDirectory)) {
+        if (result) {
+            result->errors.push_back(QStringLiteral("目标目录不能位于源目录内部: %1").arg(targetDirectory));
+        }
+        return false;
+    }
+    if (!QDir().mkpath(targetDirectory)) {
+        if (result) {
+            result->errors.push_back(QStringLiteral("创建目标目录失败: %1").arg(targetDirectory));
+        }
+        return false;
+    }
+
+    bool ok = true;
+    const QFileInfoList entries = QDir(sourceDirectory).entryInfoList(
+        QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot,
+        QDir::NoSort
+    );
+    for (const QFileInfo& entry : entries) {
+        QString targetPath = QDir(targetDirectory).filePath(entry.fileName());
+        const QFileInfo targetInfo(targetPath);
+        if (targetInfo.exists()) {
+            if (entry.isDir() && !entry.isSymLink() && targetInfo.isDir() && !targetInfo.isSymLink()) {
+                if (!mergeMoveDirectoryContents(entry.absoluteFilePath(), targetPath, folderName, result)) {
+                    ok = false;
+                    break;
+                }
+                if (!removeEmptyDirectory(entry.absoluteFilePath(), result)) {
+                    ok = false;
+                    break;
+                }
+                continue;
+            }
+            targetPath = uniqueTargetPath(targetPath);
+        }
+        if (!movePathWithFallback(entry, targetPath, folderName, result)) {
+            ok = false;
+            break;
+        }
+    }
+    if (ok && result) {
+        result->affectedPaths.push_back(targetDirectory);
+    }
+    return ok;
+}
+
+bool FileManagementEngine::movePathWithFallback(const QFileInfo& sourceInfo, const QString& targetPath, const QString& folderName, FileOperationResult* result) const {
+    const QString sourcePath = sourceInfo.absoluteFilePath();
+    if (!QDir().mkpath(QFileInfo(targetPath).absolutePath())) {
+        if (result) {
+            result->errors.push_back(QStringLiteral("创建目标目录失败: %1").arg(QFileInfo(targetPath).absolutePath()));
+        }
+        return false;
+    }
+
+    const bool renamed = sourceInfo.isDir() && !sourceInfo.isSymLink()
+        ? QDir().rename(sourcePath, targetPath)
+        : QFile::rename(sourcePath, targetPath);
+    if (renamed) {
+        return true;
+    }
+
+    if (sourceInfo.isDir() && !sourceInfo.isSymLink()) {
+        if (!mergeMoveDirectoryContents(sourcePath, targetPath, folderName, result)) {
+            return false;
+        }
+        return removeEmptyDirectory(sourcePath, result);
+    }
+
+    if (QFileInfo::exists(targetPath)) {
+        if (result) {
+            result->errors.push_back(QStringLiteral("目标位置已存在同名项: %1").arg(targetPath));
+        }
+        return false;
+    }
+    if (!QFile::copy(sourcePath, targetPath)) {
+        if (result) {
+            const QString label = folderName.isEmpty()
+                ? QStringLiteral("文件")
+                : QStringLiteral("“%1”中的文件").arg(folderName);
+            result->errors.push_back(QStringLiteral("移动%1 %2 失败: 无法复制到 %3").arg(label, sourceInfo.fileName(), targetPath));
+        }
+        return false;
+    }
+    if (!QFile::remove(sourcePath)) {
+        QFile::remove(targetPath);
+        if (result) {
+            result->errors.push_back(QStringLiteral("移动文件失败，原文件可能正被占用: %1").arg(sourcePath));
+        }
+        return false;
+    }
+    return true;
+}
+
 bool FileManagementEngine::removeDirectoryTree(const QString& path, FileOperationResult* result) const {
     const QFileInfo info(path);
     if (!info.exists() && !info.isSymLink()) {
@@ -704,6 +863,57 @@ bool FileManagementEngine::removeDirectoryTree(const QString& path, FileOperatio
         result->errors.push_back(QStringLiteral("删除目录失败: %1").arg(path));
     }
     return removed;
+}
+
+bool FileManagementEngine::removeEmptyDirectory(const QString& path, FileOperationResult* result) const {
+    if (!QFileInfo::exists(path)) {
+        return true;
+    }
+    if (isReparsePoint(path)) {
+        return removeJunction(path, result);
+    }
+    if (QDir().rmdir(path)) {
+        if (result) {
+            result->affectedPaths.push_back(path);
+        }
+        return true;
+    }
+    if (result) {
+        result->errors.push_back(QStringLiteral("无法移除目录 %1，目录可能非空或有文件被占用。").arg(path));
+    }
+    return false;
+}
+
+bool FileManagementEngine::rollbackMigration(const QString& targetDirectory, const QString& sourceDirectory) const {
+    FileOperationResult ignored;
+    QDir().mkpath(sourceDirectory);
+    if (QFileInfo::exists(targetDirectory)) {
+        mergeMoveDirectoryContents(targetDirectory, sourceDirectory, QString(), &ignored);
+    }
+    removeEmptyDirectory(targetDirectory, &ignored);
+    return ignored.errors.isEmpty();
+}
+
+bool FileManagementEngine::ensureSupportsJunction(const QString& targetRoot, const QString& folderName, FileOperationResult* result) const {
+#ifdef Q_OS_WIN
+    QStorageInfo storage(targetRoot);
+    storage.refresh();
+    if (!storage.isValid()) {
+        return true;
+    }
+    const QString fileSystem = QString::fromLatin1(storage.fileSystemType()).trimmed().toUpper();
+    if (!fileSystem.isEmpty() && fileSystem != QStringLiteral("NTFS")) {
+        if (result) {
+            result->errors.push_back(QStringLiteral("目标磁盘为 %1 格式，不支持连接点，无法迁移“%2”。请选择 NTFS 格式的磁盘作为目标。").arg(fileSystem, folderName));
+        }
+        return false;
+    }
+#else
+    Q_UNUSED(targetRoot);
+    Q_UNUSED(folderName);
+    Q_UNUSED(result);
+#endif
+    return true;
 }
 
 QString FileManagementEngine::junctionTarget(const QString& path) const {
