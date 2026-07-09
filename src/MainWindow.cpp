@@ -17,6 +17,7 @@
 #include <QGraphicsScene>
 #include <QGraphicsTextItem>
 #include <QGraphicsView>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -31,6 +32,7 @@
 #include <QPen>
 #include <QProcess>
 #include <QScreen>
+#include <QScrollArea>
 #include <QSet>
 #include <QSettings>
 #include <QSplitter>
@@ -92,6 +94,14 @@ void setTableStretch(QTableWidget* table) {
     table->verticalHeader()->setVisible(false);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setAlternatingRowColors(true);
+}
+
+void reserveActionColumn(QTableWidget* table, int column) {
+    if (!table || column < 0 || column >= table->columnCount()) {
+        return;
+    }
+    table->horizontalHeader()->setSectionResizeMode(column, QHeaderView::ResizeToContents);
+    table->setColumnWidth(column, 92);
 }
 
 QString cleanResultMessage(const CleanResult& result) {
@@ -282,13 +292,13 @@ MainWindow::MainWindow(QWidget* parent)
 
     pages_ = new QStackedWidget(this);
     pages_->setObjectName(QStringLiteral("contentArea"));
-    pages_->addWidget(createCleanPage());
-    pages_->addWidget(createOptimizePage());
-    pages_->addWidget(createGpuPage());
-    pages_->addWidget(createUninstallPage());
-    pages_->addWidget(createFilePage());
-    pages_->addWidget(createRepairPage());
-    pages_->addWidget(createAccountPage());
+    pages_->addWidget(scrollablePage(createCleanPage()));
+    pages_->addWidget(scrollablePage(createOptimizePage()));
+    pages_->addWidget(scrollablePage(createGpuPage()));
+    pages_->addWidget(scrollablePage(createUninstallPage()));
+    pages_->addWidget(scrollablePage(createFilePage()));
+    pages_->addWidget(scrollablePage(createRepairPage()));
+    pages_->addWidget(scrollablePage(createAccountPage()));
     layout->addWidget(pages_, 1);
     setCentralWidget(central);
 
@@ -354,6 +364,17 @@ QWidget* MainWindow::createSidebar() {
     return sidebar;
 }
 
+QWidget* MainWindow::scrollablePage(QWidget* page) {
+    QScrollArea* scrollArea = new QScrollArea(this);
+    scrollArea->setObjectName(QStringLiteral("pageScrollArea"));
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    scrollArea->setWidget(page);
+    return scrollArea;
+}
+
 QWidget* MainWindow::createCleanPage() {
     auto* page = new QWidget(this);
     auto* layout = new QVBoxLayout(page);
@@ -391,7 +412,9 @@ QWidget* MainWindow::createCleanPage() {
     heroLayout->addLayout(stats, 3);
     layout->addWidget(heroPanel);
 
-    auto* controls = new QHBoxLayout();
+    auto* controls = new QGridLayout();
+    controls->setHorizontalSpacing(8);
+    controls->setVerticalSpacing(8);
     recommendedMode = new QCheckBox(QStringLiteral("推荐"), page);
     professionalMode = new QCheckBox(QStringLiteral("专业"), page);
     selectAllMode = new QCheckBox(QStringLiteral("全选"), page);
@@ -399,14 +422,9 @@ QWidget* MainWindow::createCleanPage() {
     connect(recommendedMode, &QCheckBox::clicked, this, [this] { updateModeSelection(recommendedMode); });
     connect(professionalMode, &QCheckBox::clicked, this, [this] { updateModeSelection(professionalMode); });
     connect(selectAllMode, &QCheckBox::clicked, this, [this] { updateModeSelection(selectAllMode); });
-    controls->addWidget(recommendedMode);
-    controls->addWidget(professionalMode);
-    controls->addWidget(selectAllMode);
     simulateMode_ = new QCheckBox(QStringLiteral("模拟模式"), page);
     backupMode_ = new QCheckBox(QStringLiteral("删除前备份"), page);
     backupMode_->setChecked(true);
-    controls->addWidget(simulateMode_);
-    controls->addWidget(backupMode_);
     auto* backupDirButton = secondaryButton(QStringLiteral("备份目录"));
     connect(backupDirButton, &QPushButton::clicked, this, [this] {
         const QString selected = QFileDialog::getExistingDirectory(
@@ -421,9 +439,6 @@ QWidget* MainWindow::createCleanPage() {
     });
     auto* backupManagerButton = secondaryButton(QStringLiteral("备份管理"));
     connect(backupManagerButton, &QPushButton::clicked, this, &MainWindow::openBackupManager);
-    controls->addWidget(backupDirButton);
-    controls->addWidget(backupManagerButton);
-    controls->addStretch();
 
     auto* scanButton = primaryButton(QStringLiteral("一键扫描"));
     connect(scanButton, &QPushButton::clicked, this, &MainWindow::startScan);
@@ -431,9 +446,17 @@ QWidget* MainWindow::createCleanPage() {
     connect(cleanSelectedButton, &QPushButton::clicked, this, &MainWindow::cleanSelected);
     auto* cleanAllButton = primaryButton(QStringLiteral("一键清理"));
     connect(cleanAllButton, &QPushButton::clicked, this, &MainWindow::cleanAllForCurrentMode);
-    controls->addWidget(scanButton);
-    controls->addWidget(cleanSelectedButton);
-    controls->addWidget(cleanAllButton);
+    controls->addWidget(recommendedMode, 0, 0);
+    controls->addWidget(professionalMode, 0, 1);
+    controls->addWidget(selectAllMode, 0, 2);
+    controls->addWidget(simulateMode_, 0, 3);
+    controls->addWidget(backupMode_, 0, 4);
+    controls->addWidget(backupDirButton, 0, 5);
+    controls->addWidget(backupManagerButton, 0, 6);
+    controls->addWidget(scanButton, 1, 0);
+    controls->addWidget(cleanSelectedButton, 1, 1);
+    controls->addWidget(cleanAllButton, 1, 2);
+    controls->setColumnStretch(7, 1);
     layout->addLayout(controls);
 
     currentScanPath = new QLabel(QStringLiteral("等待扫描。"), page);
@@ -504,6 +527,8 @@ QWidget* MainWindow::createOptimizePage() {
             windowsOptimizationTable_->setColumnCount(7);
             windowsOptimizationTable_->setHorizontalHeaderLabels({QStringLiteral("分类"), QStringLiteral("项目"), QStringLiteral("风险"), QStringLiteral("说明"), QStringLiteral("执行"), QStringLiteral("恢复"), QStringLiteral("管理员")});
             setTableStretch(windowsOptimizationTable_);
+            reserveActionColumn(windowsOptimizationTable_, 4);
+            reserveActionColumn(windowsOptimizationTable_, 5);
             optimizerTabs_->addTab(windowsOptimizationTable_, tab);
             continue;
         }
@@ -585,6 +610,8 @@ QWidget* MainWindow::createGpuPage() {
         QStringLiteral("还原"),
     });
     setTableStretch(gpuActionTable_);
+    reserveActionColumn(gpuActionTable_, 4);
+    reserveActionColumn(gpuActionTable_, 5);
     layout->addWidget(gpuActionTable_, 1);
 
     gpuLog_ = new QTextEdit(page);
@@ -655,6 +682,7 @@ QWidget* MainWindow::createUninstallPage() {
             QStringLiteral("操作"),
         });
         setTableStretch(table);
+        reserveActionColumn(table, 4);
     }
     uninstallTabs_->addTab(uninstallTable_, QStringLiteral("用户安装程序"));
     uninstallTabs_->addTab(storeUninstallTable_, QStringLiteral("微软商店应用"));
@@ -692,7 +720,9 @@ QWidget* MainWindow::createFilePage() {
     rootRow->addWidget(chooseRoot);
     featureLayout->addLayout(rootRow);
 
-    auto* actionRow = new QHBoxLayout();
+    auto* actionGrid = new QGridLayout();
+    actionGrid->setHorizontalSpacing(8);
+    actionGrid->setVerticalSpacing(8);
     auto* folderUsage = primaryButton(QStringLiteral("扫描文件夹占用"));
     auto* large = primaryButton(QStringLiteral("扫描大文件"));
     auto* duplicate = primaryButton(QStringLiteral("扫描重复文件"));
@@ -705,14 +735,14 @@ QWidget* MainWindow::createFilePage() {
     connect(empty, &QPushButton::clicked, this, &MainWindow::scanEmptyFolders);
     connect(deleteButton, &QPushButton::clicked, this, &MainWindow::deleteSelectedFileItems);
     connect(shredButton, &QPushButton::clicked, this, &MainWindow::shredSelectedFileItems);
-    actionRow->addWidget(folderUsage);
-    actionRow->addWidget(large);
-    actionRow->addWidget(duplicate);
-    actionRow->addWidget(empty);
-    actionRow->addWidget(deleteButton);
-    actionRow->addWidget(shredButton);
-    actionRow->addStretch();
-    featureLayout->addLayout(actionRow);
+    actionGrid->addWidget(folderUsage, 0, 0);
+    actionGrid->addWidget(large, 0, 1);
+    actionGrid->addWidget(duplicate, 0, 2);
+    actionGrid->addWidget(empty, 1, 0);
+    actionGrid->addWidget(deleteButton, 1, 1);
+    actionGrid->addWidget(shredButton, 1, 2);
+    actionGrid->setColumnStretch(3, 1);
+    featureLayout->addLayout(actionGrid);
     layout->addWidget(featureCard);
 
     fileTabs_ = new QTabWidget(page);
@@ -792,7 +822,9 @@ QWidget* MainWindow::createFilePage() {
     auto* migrationTitle = new QLabel(QStringLiteral("系统目录一键迁移专区"), migrationPage);
     migrationTitle->setObjectName(QStringLiteral("sectionTitle"));
     migrationLayout->addWidget(migrationTitle);
-    auto* migrationControls = new QHBoxLayout();
+    auto* migrationControls = new QGridLayout();
+    migrationControls->setHorizontalSpacing(8);
+    migrationControls->setVerticalSpacing(8);
     migrationTargetEdit_ = new QLineEdit(migrationPage);
     migrationTargetEdit_->setPlaceholderText(QStringLiteral("目标根目录，请选择非系统盘，例如 D:\\C_DiskGlow_Moved"));
     migrationTargetEdit_->setText(defaultMigrationTargetRoot());
@@ -817,12 +849,13 @@ QWidget* MainWindow::createFilePage() {
     connect(refreshMigration, &QPushButton::clicked, this, &MainWindow::refreshMigrationFolders);
     connect(migrate, &QPushButton::clicked, this, &MainWindow::migrateSelectedFolders);
     connect(restore, &QPushButton::clicked, this, &MainWindow::restoreSelectedFolders);
-    migrationControls->addWidget(migrationTargetEdit_, 1);
-    migrationControls->addWidget(migrationMoveFiles_);
-    migrationControls->addWidget(browseMigration);
-    migrationControls->addWidget(refreshMigration);
-    migrationControls->addWidget(migrate);
-    migrationControls->addWidget(restore);
+    migrationControls->addWidget(migrationTargetEdit_, 0, 0, 1, 4);
+    migrationControls->addWidget(browseMigration, 0, 4);
+    migrationControls->addWidget(migrationMoveFiles_, 1, 0);
+    migrationControls->addWidget(refreshMigration, 1, 1);
+    migrationControls->addWidget(migrate, 1, 2);
+    migrationControls->addWidget(restore, 1, 3);
+    migrationControls->setColumnStretch(0, 1);
     migrationLayout->addLayout(migrationControls);
     migrationTable_ = new QTableWidget(migrationPage);
     migrationTable_->setColumnCount(6);
@@ -919,7 +952,9 @@ QWidget* MainWindow::createAccountPage() {
     layout->addWidget(accountPasswordEdit_);
     layout->addWidget(cardCodeEdit_);
 
-    auto* row = new QHBoxLayout();
+    auto* accountActions = new QGridLayout();
+    accountActions->setHorizontalSpacing(8);
+    accountActions->setVerticalSpacing(8);
     auto* registerButton = secondaryButton(QStringLiteral("注册"));
     auto* loginButton = primaryButton(QStringLiteral("登录"));
     auto* redeemButton = primaryButton(QStringLiteral("兑换卡密"));
@@ -928,12 +963,12 @@ QWidget* MainWindow::createAccountPage() {
     connect(loginButton, &QPushButton::clicked, this, &MainWindow::loginAccount);
     connect(redeemButton, &QPushButton::clicked, this, &MainWindow::redeemCard);
     connect(logoutButton, &QPushButton::clicked, this, &MainWindow::logoutAccount);
-    row->addWidget(registerButton);
-    row->addWidget(loginButton);
-    row->addWidget(redeemButton);
-    row->addWidget(logoutButton);
-    row->addStretch();
-    layout->addLayout(row);
+    accountActions->addWidget(registerButton, 0, 0);
+    accountActions->addWidget(loginButton, 0, 1);
+    accountActions->addWidget(redeemButton, 1, 0);
+    accountActions->addWidget(logoutButton, 1, 1);
+    accountActions->setColumnStretch(2, 1);
+    layout->addLayout(accountActions);
     layout->addStretch();
     return page;
 }
@@ -942,6 +977,8 @@ void MainWindow::applyStyle() {
     qApp->setStyleSheet(QStringLiteral(R"(
         QWidget { font-family: "Microsoft YaHei", "Segoe UI", sans-serif; font-size: 13px; color: #1f2937; }
         #appRoot, #contentArea { background: #f4f7f5; }
+        QScrollArea#pageScrollArea { border: 0; background: #f4f7f5; }
+        QScrollArea#pageScrollArea > QWidget > QWidget { background: #f4f7f5; }
         #sidebar { background: #0f8f5f; }
         #brandTitle { color: white; font-size: 20px; font-weight: 700; }
         QPushButton { border: 0; border-radius: 6px; padding: 8px 12px; background: #e5e7eb; }

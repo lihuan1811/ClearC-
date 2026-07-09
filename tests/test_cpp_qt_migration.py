@@ -491,3 +491,33 @@ def test_bx_matches_python_qt_location_and_file_usage_has_treemap():
         "fileTabs_->setCurrentWidget(folderUsagePage_)",
     ]:
         assert token in header + source
+
+
+def test_fixed_half_window_keeps_actions_clickable():
+    header = read(SRC / "MainWindow.h")
+    source = read(SRC / "MainWindow.cpp")
+
+    for token in [
+        "#include <QScrollArea>",
+        "#include <QGridLayout>",
+        "scrollablePage(createCleanPage())",
+        "scrollablePage(createOptimizePage())",
+        "scrollablePage(createGpuPage())",
+        "scrollablePage(createUninstallPage())",
+        "scrollablePage(createFilePage())",
+        "scrollablePage(createRepairPage())",
+        "scrollablePage(createAccountPage())",
+        "QScrollArea* scrollArea",
+        "setWidgetResizable(true)",
+        "setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded)",
+        "auto* controls = new QGridLayout()",
+        "auto* actionGrid = new QGridLayout()",
+        "auto* migrationControls = new QGridLayout()",
+        "auto* accountActions = new QGridLayout()",
+        "reserveActionColumn(windowsOptimizationTable_, 4)",
+        "reserveActionColumn(windowsOptimizationTable_, 5)",
+        "reserveActionColumn(gpuActionTable_, 4)",
+        "reserveActionColumn(gpuActionTable_, 5)",
+        "reserveActionColumn(table, 4)",
+    ]:
+        assert token in header + source

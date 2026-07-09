@@ -43,6 +43,7 @@ private:
     QWidget* createFilePage();
     QWidget* createRepairPage();
     QWidget* createAccountPage();
+    QWidget* scrollablePage(QWidget* page);
 
     void applyStyle();
     void selectPage(int index);
