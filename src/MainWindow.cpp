@@ -627,7 +627,7 @@ QWidget* MainWindow::createFilePage() {
     auto* dDrive = secondaryButton(QStringLiteral("D盘"));
     auto* refresh = secondaryButton(QStringLiteral("刷新磁盘"));
     fileDiskInfoLabel_ = new QLabel(page);
-    connect(diskCombo_, &QComboBox::currentIndexChanged, this, [this](int) {
+    connect(diskCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         selectDiskRoot(diskCombo_->currentData().toString());
     });
     connect(cDrive, &QPushButton::clicked, this, [this] { selectDiskRoot(QStringLiteral("C:/")); });
