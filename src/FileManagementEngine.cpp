@@ -573,6 +573,16 @@ FileOperationResult FileManagementEngine::migratePersonalFolder(const QString& f
     if (!ensureSupportsJunction(targetRootPath, folder.name, &result)) {
         return result;
     }
+    const QFileInfo targetInfo(target);
+    if (targetInfo.exists()
+        && (!targetInfo.isDir() || targetInfo.isSymLink() || isReparsePoint(target))) {
+        result.errors.push_back(QStringLiteral("迁移目标不是可用的普通目录: %1").arg(target));
+        return result;
+    }
+    if (targetInfo.exists() && directoryHasEntries(target)) {
+        result.errors.push_back(QStringLiteral("迁移目标已存在内容，为避免混入旧文件和破坏回滚，未执行迁移: %1").arg(target));
+        return result;
+    }
     if (!QDir().mkpath(target)) {
         result.errors.push_back(QStringLiteral("创建目标目录失败: %1").arg(target));
         return result;

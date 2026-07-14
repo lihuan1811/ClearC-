@@ -344,7 +344,7 @@ QString GpuOptimizationEngine::restoreAction(const GpuOptimizationAction& action
 QVector<GpuDeviceInfo> GpuOptimizationEngine::queryVideoControllers() const {
     QVector<GpuDeviceInfo> devices;
 #ifdef Q_OS_WIN
-    const QString script = QStringLiteral("Get-WmiObject Win32_VideoController | ForEach-Object { '{0}`t{1}`t{2}' -f ($_.Name -replace '`t',' '),$_.DriverVersion,$_.AdapterRAM }");
+    const QString script = QStringLiteral("Get-WmiObject Win32_VideoController | ForEach-Object { \"{0}`t{1}`t{2}\" -f ($_.Name -replace \"`t\",\" \"),$_.DriverVersion,$_.AdapterRAM }");
     int exitCode = 0;
     const QString output = runProcess(QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), script}, &exitCode);
     if (exitCode != 0 || output.isEmpty()) {

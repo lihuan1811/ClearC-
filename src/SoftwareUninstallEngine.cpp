@@ -46,7 +46,7 @@ bool isProtectedResidualPath(const QString& path);
 
 qint64 directorySize(const QString& path) {
     qint64 total = 0;
-    QDirIterator iterator(path, QDir::Files | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
+    QDirIterator iterator(path, QDir::Files | QDir::Hidden | QDir::System | QDir::NoSymLinks, QDirIterator::Subdirectories);
     while (iterator.hasNext()) {
         iterator.next();
         total += iterator.fileInfo().size();
@@ -156,7 +156,7 @@ QVector<InstalledApplication> SoftwareUninstallEngine::installedApplications() c
         {
             QStringLiteral("-NoProfile"),
             QStringLiteral("-Command"),
-            QStringLiteral("Get-AppxPackage | Select-Object Name,Publisher,Version,PackageFullName,InstallLocation | ConvertTo-Json -Compress")
+            QStringLiteral("[Console]::OutputEncoding=(New-Object System.Text.UTF8Encoding $false); Get-AppxPackage | Select-Object Name,Publisher,Version,PackageFullName,InstallLocation | ConvertTo-Json -Compress")
         }
     );
     if (appx.waitForFinished(20000) && appx.exitCode() == 0) {
@@ -181,7 +181,7 @@ QVector<InstalledApplication> SoftwareUninstallEngine::installedApplications() c
             }
             QString escaped = app.packageFullName;
             escaped.replace(QLatin1Char('\''), QStringLiteral("''"));
-            app.uninstallCommand = QStringLiteral("powershell -NoProfile -Command \"Get-AppxPackage -PackageFullName '%1' | Remove-AppxPackage\"").arg(escaped);
+            app.uninstallCommand = QStringLiteral("powershell -NoProfile -Command \"Remove-AppxPackage -Package '%1'\"").arg(escaped);
             app.storeApp = true;
             fillMissingInstallDetails(&app);
             applications.push_back(app);

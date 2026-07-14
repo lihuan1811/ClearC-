@@ -63,6 +63,7 @@ struct BatchUninstallResult {
     int completed = 0;
     QStringList errors;
     QStringList registryBackups;
+    QVector<InstalledApplication> completedApplications;
 };
 
 struct GlobalRestoreResult {
@@ -1501,10 +1502,8 @@ void MainWindow::uninstallApplication(int appIndex, bool strong) {
             .arg(result.registryBackup));
         if (!result.errors.isEmpty()) {
             QMessageBox::warning(this, QStringLiteral("软件卸载"), result.errors.join(QStringLiteral("\n")));
-        } else if (result.completed && strong) {
-            cleanApplicationResiduals(app);
         } else if (result.completed) {
-            QMessageBox::information(this, QStringLiteral("软件卸载"), QStringLiteral("卸载程序已结束: %1").arg(app.name));
+            cleanApplicationResiduals(app);
         }
         watcher->deleteLater();
         refreshInstalledApps();
@@ -1550,6 +1549,9 @@ void MainWindow::uninstallSelectedApplications() {
                 .arg(result.errors.size())
                 .arg(result.errors.join(QStringLiteral("\n")))
         );
+        if (!result.completedApplications.isEmpty()) {
+            cleanApplicationResidualsBatch(result.completedApplications);
+        }
         watcher->deleteLater();
         refreshInstalledApps();
     });
@@ -1558,8 +1560,9 @@ void MainWindow::uninstallSelectedApplications() {
         SoftwareUninstallEngine engine;
         for (const InstalledApplication& app : applications) {
             const UninstallResult result = engine.startUninstall(app);
-            if (result.completed) {
+            if (result.completed && result.errors.isEmpty()) {
                 ++batch.completed;
+                batch.completedApplications.push_back(app);
             }
             if (!result.registryBackup.isEmpty()) {
                 batch.registryBackups.push_back(result.registryBackup);
@@ -1586,9 +1589,83 @@ void MainWindow::cleanApplicationResiduals(const InstalledApplication& app) {
         )) {
         return;
     }
-    const UninstallResult result = uninstallEngine_.cleanResiduals(app);
-    showOperationLog(QStringLiteral("清理卸载残留: %1，删除 %2，失败 %3").arg(app.name).arg(result.removedPaths.size()).arg(result.errors.size()));
-    QMessageBox::information(this, QStringLiteral("残留清理"), QStringLiteral("删除 %1 项，失败 %2 项。\n%3").arg(result.removedPaths.size()).arg(result.errors.size()).arg(result.errors.join(QStringLiteral("\n"))));
+    globalStatusLabel_->setText(QStringLiteral("正在清理卸载残留: %1").arg(app.name));
+    auto* watcher = new QFutureWatcher<UninstallResult>(this);
+    connect(watcher, &QFutureWatcher<UninstallResult>::finished, this, [this, watcher, app] {
+        const UninstallResult result = watcher->result();
+        showOperationLog(QStringLiteral("清理卸载残留: %1，删除 %2，失败 %3").arg(app.name).arg(result.removedPaths.size()).arg(result.errors.size()));
+        const QString message = QStringLiteral("删除 %1 项，失败 %2 项。\n%3")
+            .arg(result.removedPaths.size())
+            .arg(result.errors.size())
+            .arg(result.errors.join(QStringLiteral("\n")));
+        if (result.errors.isEmpty()) {
+            QMessageBox::information(this, QStringLiteral("残留清理"), message);
+        } else {
+            QMessageBox::warning(this, QStringLiteral("残留清理"), message);
+        }
+        watcher->deleteLater();
+        refreshInstalledApps();
+    });
+    watcher->setFuture(QtConcurrent::run([app] {
+        return SoftwareUninstallEngine().cleanResiduals(app);
+    }));
+}
+
+void MainWindow::cleanApplicationResidualsBatch(const QVector<InstalledApplication>& applications) {
+    QVector<InstalledApplication> withResiduals;
+    QStringList summary;
+    for (const InstalledApplication& app : applications) {
+        const QStringList paths = uninstallEngine_.findResidualPaths(app);
+        if (paths.isEmpty()) {
+            continue;
+        }
+        withResiduals.push_back(app);
+        summary.push_back(QStringLiteral("%1: %2 项").arg(app.name).arg(paths.size()));
+    }
+    if (withResiduals.isEmpty()) {
+        showOperationLog(QStringLiteral("批量卸载残留扫描完成，无残留"));
+        return;
+    }
+    if (!confirmAction(
+            this,
+            QStringLiteral("批量清理卸载残留"),
+            QStringLiteral("检测到 %1 个软件仍有残留。将删除安装目录、残留文件、卸载注册表项、启动项和快捷方式。\n\n%2\n\n是否继续？")
+                .arg(withResiduals.size())
+                .arg(summary.join(QStringLiteral("\n")))
+        )) {
+        return;
+    }
+    globalStatusLabel_->setText(QStringLiteral("正在批量清理 %1 个软件的残留...").arg(withResiduals.size()));
+    auto* watcher = new QFutureWatcher<UninstallResult>(this);
+    connect(watcher, &QFutureWatcher<UninstallResult>::finished, this, [this, watcher] {
+        const UninstallResult result = watcher->result();
+        const QString message = QStringLiteral("已删除 %1 项，失败 %2 项。\n%3")
+            .arg(result.removedPaths.size())
+            .arg(result.errors.size())
+            .arg(result.errors.join(QStringLiteral("\n")));
+        showOperationLog(QStringLiteral("批量清理卸载残留，删除 %1，失败 %2")
+            .arg(result.removedPaths.size())
+            .arg(result.errors.size()));
+        if (result.errors.isEmpty()) {
+            QMessageBox::information(this, QStringLiteral("批量清理卸载残留"), message);
+        } else {
+            QMessageBox::warning(this, QStringLiteral("批量清理卸载残留"), message);
+        }
+        watcher->deleteLater();
+        refreshInstalledApps();
+    });
+    watcher->setFuture(QtConcurrent::run([withResiduals] {
+        UninstallResult combined;
+        SoftwareUninstallEngine engine;
+        for (const InstalledApplication& app : withResiduals) {
+            const UninstallResult result = engine.cleanResiduals(app);
+            combined.removedPaths.append(result.removedPaths);
+            for (const QString& error : result.errors) {
+                combined.errors.push_back(QStringLiteral("%1: %2").arg(app.name, error));
+            }
+        }
+        return combined;
+    }));
 }
 
 void MainWindow::populateOptimizationTable(QTableWidget* table, const QVector<WindowsOptimizationAction>& actions) {

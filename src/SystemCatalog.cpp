@@ -410,6 +410,16 @@ void captureDefenderAndHibernateState(const WindowsOptimizationAction& action, Q
             backup->setValue(QStringLiteral("hibernate/enabled"), power.value(QStringLiteral("HibernateEnabled")).toInt() != 0);
         }
     }
+    if (action.id == QStringLiteral("gaming_restore")) {
+        QSettings systemRestore(
+            QStringLiteral("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore"),
+            QSettings::NativeFormat
+        );
+        backup->setValue(
+            QStringLiteral("systemRestore/disabled"),
+            systemRestore.value(QStringLiteral("DisableSR"), 0).toInt() != 0
+        );
+    }
 #else
     Q_UNUSED(action);
     Q_UNUSED(backup);
@@ -819,6 +829,11 @@ QString SystemCatalog::runOptimizationAction(
     }
 
     QVector<WindowsOptimizationCommand> commands = revert ? action.revertCommands : action.commands;
+    if (revert && action.id == QStringLiteral("gaming_restore")
+        && backup.contains(QStringLiteral("systemRestore/disabled"))
+        && backup.value(QStringLiteral("systemRestore/disabled")).toBool()) {
+        commands = action.commands;
+    }
     QString edgeNotice;
     if ((action.id == QStringLiteral("edge_install") || action.id == QStringLiteral("edge_remove"))
         && backup.contains(QStringLiteral("edge/installed"))) {

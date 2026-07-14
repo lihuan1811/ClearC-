@@ -78,6 +78,7 @@ def test_uninstall_supports_registry_uwp_search_sort_backup_batch_and_residuals(
         "storeApp",
         "installedApplications",
         "Get-AppxPackage",
+        "Remove-AppxPackage -Package",
         "EstimatedSize",
         "InstallLocation",
         "InstallDate",
@@ -93,6 +94,7 @@ def test_uninstall_supports_registry_uwp_search_sort_backup_batch_and_residuals(
         "搜索软件名称、发布者或安装路径",
         "setSortingEnabled(true)",
         "批量卸载选中",
+        "cleanApplicationResidualsBatch",
         "常规卸载",
         "强力粉碎卸载",
         "清理卸载残留",
@@ -100,8 +102,12 @@ def test_uninstall_supports_registry_uwp_search_sort_backup_batch_and_residuals(
         assert token in window
     assert "SoftwareUninstallEngine.cpp" in cmake
     assert "startDetached" not in engine
+    assert "Get-AppxPackage -PackageFullName" not in engine
     assert "singleShot(1000" not in window
     assert "waitForFinished(-1)" in engine
+    assert "else if (result.completed)" in window
+    assert "cleanApplicationResiduals(app);" in window
+    assert "QFutureWatcher<UninstallResult>" in window
 
 
 def test_system_optimization_contains_only_the_four_final_prd_sections():
@@ -120,6 +126,7 @@ def test_system_optimization_contains_only_the_four_final_prd_sections():
         "切换高性能电源并关闭 CPU 节能",
         "关闭系统通知",
         "禁用系统还原",
+        "systemRestore/disabled",
         "关闭休眠",
         "禁用磁盘索引",
         "Windows 自动更新：一键禁用",
@@ -145,6 +152,8 @@ def test_system_optimization_contains_only_the_four_final_prd_sections():
     assert "NvidiaNvapiBridge" in gpu
     assert "AmdAdlxBridge" in gpu
     assert "Get-WmiObject Win32_VideoController" in gpu
+    assert '\\"{0}`t{1}`t{2}\\"' in gpu
+    assert "'{0}`t{1}`t{2}'" not in gpu
     assert "Get-CimInstance Win32_VideoController" not in gpu
     assert "NV_Cache" not in gpu
 
@@ -194,6 +203,7 @@ def test_file_manager_has_disk_switch_filters_operations_visualization_and_only_
         "restorePersonalFolder",
         "还原所有迁移目录",
         "目标磁盘为 %1 格式，不支持连接点",
+        "迁移目标已存在内容，为避免混入旧文件和破坏回滚",
     ]:
         assert token in engine + window
 

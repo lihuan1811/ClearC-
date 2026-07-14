@@ -73,6 +73,7 @@ private:
     void uninstallApplication(int appIndex, bool strong);
     void uninstallSelectedApplications();
     void cleanApplicationResiduals(const InstalledApplication& app);
+    void cleanApplicationResidualsBatch(const QVector<InstalledApplication>& applications);
 
     QTableWidget* createOptimizationTable(QWidget* parent);
     void populateOptimizationTable(QTableWidget* table, const QVector<WindowsOptimizationAction>& actions);
