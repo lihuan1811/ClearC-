@@ -85,6 +85,7 @@ public:
     FileOperationResult repairFolderPermission(const QString& path) const;
 
     QVector<MigrationFolder> migrationCatalog() const;
+    MigrationFolder migrationFolderByKey(const QString& folderKey) const;
     QVector<MigrationFolder> scanMigrationFolders() const;
     FileOperationResult migratePersonalFolder(const QString& folderKey, const QString& targetRoot, bool moveFiles = true) const;
     FileOperationResult restorePersonalFolder(const QString& folderKey) const;
@@ -100,7 +101,6 @@ public:
 private:
     FileOperationResult copyOrMove(const QStringList& paths, const QString& targetDirectory, bool move) const;
     FileOperationResult runCommand(const QString& executable, const QStringList& arguments) const;
-    MigrationFolder migrationFolderByKey(const QString& folderKey) const;
     bool copyDirectoryContents(const QString& sourceDirectory, const QString& targetDirectory, FileOperationResult* result) const;
     bool mergeMoveDirectoryContents(const QString& sourceDirectory, const QString& targetDirectory, const QString& folderName, FileOperationResult* result) const;
     bool movePathWithFallback(const QFileInfo& sourceInfo, const QString& targetPath, const QString& folderName, FileOperationResult* result) const;

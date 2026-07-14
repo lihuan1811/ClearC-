@@ -252,7 +252,7 @@ void capturePowerState(const WindowsOptimizationAction& action, QSettings* backu
                 &GUID_PROCESSOR_THROTTLE_MINIMUM,
                 &minimum
             ) == ERROR_SUCCESS) {
-            backup->setValue(QStringLiteral("power/highPerformanceMinimum"), minimum);
+            backup->setValue(QStringLiteral("power/highPerformanceMinimum"), static_cast<quint32>(minimum));
         }
     }
 }
@@ -312,7 +312,7 @@ void captureServiceStates(const WindowsOptimizationAction& action, QSettings* ba
             && QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&status), sizeof(status), &statusBytes)) {
             const QString prefix = QStringLiteral("services/%1/").arg(name);
             backup->setValue(prefix + QStringLiteral("exists"), true);
-            backup->setValue(prefix + QStringLiteral("startType"), config->dwStartType);
+            backup->setValue(prefix + QStringLiteral("startType"), static_cast<quint32>(config->dwStartType));
             backup->setValue(prefix + QStringLiteral("running"), status.dwCurrentState == SERVICE_RUNNING);
             SERVICE_DELAYED_AUTO_START_INFO delayed{};
             DWORD delayedBytes = 0;

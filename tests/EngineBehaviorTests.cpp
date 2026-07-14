@@ -61,7 +61,7 @@ bool pruningKeepsNewestBackups() {
     const QString backupRoot = directory.filePath(QStringLiteral("backups"));
     CleanupEntry entry;
     entry.path = source;
-    entry.files = {source};
+    entry.files = QStringList{source};
     CleanOptions options;
     options.backup = true;
     options.backupRoot = backupRoot;

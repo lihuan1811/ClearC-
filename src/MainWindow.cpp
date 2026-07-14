@@ -1649,7 +1649,7 @@ void MainWindow::runOptimizationAction(const WindowsOptimizationAction& action, 
         QMessageBox::information(this, action.title, QStringLiteral("退出码 %1\n%2").arg(exitCode).arg(result.output));
         watcher->deleteLater();
     });
-    watcher->setFuture(QtConcurrent::run([action, commands] {
+    watcher->setFuture(QtConcurrent::run([action, revert] {
         CommandBatchResult result;
         int exitCode = 0;
         result.output = SystemCatalog::runOptimizationAction(action, revert, &exitCode);

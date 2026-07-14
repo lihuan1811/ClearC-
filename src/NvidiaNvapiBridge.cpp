@@ -8,8 +8,8 @@
 #endif
 #include <windows.h>
 
-#include <NvApiDriverSettings.h>
 #include <nvapi.h>
+#include <NvApiDriverSettings.h>
 
 #include <array>
 #include <cstring>
@@ -232,9 +232,9 @@ QString NvidiaNvapiBridge::applyGlobalPerformanceSettings(int* exitCode) {
             return QStringLiteral("无法读取 NVIDIA 原始设置，未进行修改");
         }
         settings.setValue(QStringLiteral("powerOverride"), power.isCurrentPredefined == 0);
-        settings.setValue(QStringLiteral("powerValue"), power.u32CurrentValue);
+        settings.setValue(QStringLiteral("powerValue"), static_cast<quint32>(power.u32CurrentValue));
         settings.setValue(QStringLiteral("vsyncOverride"), vsync.isCurrentPredefined == 0);
-        settings.setValue(QStringLiteral("vsyncValue"), vsync.u32CurrentValue);
+        settings.setValue(QStringLiteral("vsyncValue"), static_cast<quint32>(vsync.u32CurrentValue));
     }
 
     const bool wrotePower = writeSetting(runtime, session, profile, PREFERRED_PSTATE_ID, PREFERRED_PSTATE_PREFER_MAX, &error);
