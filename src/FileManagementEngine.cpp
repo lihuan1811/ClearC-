@@ -8,7 +8,7 @@
 #include <QMap>
 #include <QProcess>
 #include <QRegularExpression>
-#include <QSet>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QStorageInfo>
 
@@ -55,21 +55,7 @@ bool isSameOrChild(const QString& path, const QString& root) {
 }
 
 bool shouldSkipScanDirectory(const QFileInfo& info) {
-    if (!info.isDir()) {
-        return false;
-    }
-    const QString name = info.fileName().toLower();
-    static const QSet<QString> skippedNames = {
-        QStringLiteral("$recycle.bin"),
-        QStringLiteral("system volume information"),
-        QStringLiteral("windowsapps"),
-        QStringLiteral("winsxs"),
-        QStringLiteral("$windows.~ws"),
-        QStringLiteral("$windows.~bt"),
-        QStringLiteral("config.msi"),
-        QStringLiteral("driverstore"),
-    };
-    return skippedNames.contains(name) || FileManagementEngine::isReparsePoint(info.absoluteFilePath());
+    return info.isDir() && FileManagementEngine::isReparsePoint(info.absoluteFilePath());
 }
 
 QString topLevelUsagePath(const QDir& rootDir, const QFileInfo& info) {
@@ -118,7 +104,7 @@ QVector<ManagedFileEntry> FileManagementEngine::listFiles(const QString& rootPat
         return files;
     }
 
-    QDirIterator iterator(rootPath, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
+    QDirIterator iterator(rootPath, QDir::Files | QDir::Hidden | QDir::System | QDir::NoSymLinks, QDirIterator::Subdirectories);
     while (iterator.hasNext() && files.size() < limit) {
         const QString path = iterator.next();
         const ManagedFileType detected = detectType(path);
@@ -166,7 +152,7 @@ FolderUsageScan FileManagementEngine::scanFolderUsageDetailed(const QString& roo
         }
 
         const QFileInfoList entries = QDir(current).entryInfoList(
-            QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks
+            QDir::Files | QDir::Dirs | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot | QDir::NoSymLinks
         );
         for (const QFileInfo& info : entries) {
             if (info.isDir()) {
@@ -244,26 +230,6 @@ FolderUsageScan FileManagementEngine::scanFolderUsageDetailed(const QString& roo
     }
 
     return scan;
-}
-
-QVector<EmptyFolderEntry> FileManagementEngine::scanEmptyFolders(const QString& rootPath, int limit) const {
-    QVector<EmptyFolderEntry> folders;
-    if (!QFileInfo(rootPath).isDir()) {
-        return folders;
-    }
-
-    QDirIterator iterator(rootPath, QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks, QDirIterator::Subdirectories);
-    while (iterator.hasNext() && folders.size() < limit) {
-        const QString path = iterator.next();
-        QDir dir(path);
-        if (dir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot).isEmpty()) {
-            folders.push_back({path});
-        }
-    }
-    std::sort(folders.begin(), folders.end(), [](const EmptyFolderEntry& a, const EmptyFolderEntry& b) {
-        return a.path.length() > b.path.length();
-    });
-    return folders;
 }
 
 FileOperationResult FileManagementEngine::copyFiles(const QStringList& paths, const QString& targetDirectory) const {
@@ -370,18 +336,11 @@ QVector<MigrationFolder> FileManagementEngine::migrationCatalog() const {
     return {
         {QStringLiteral("desktop"), QStringLiteral("桌面"), QStringLiteral("Desktop"), joinPath(home, {QStringLiteral("Desktop")})},
         {QStringLiteral("documents"), QStringLiteral("我的文档"), QStringLiteral("Documents"), joinPath(home, {QStringLiteral("Documents")})},
-        {QStringLiteral("favorites"), QStringLiteral("收藏夹"), QStringLiteral("Favorites"), joinPath(home, {QStringLiteral("Favorites")})},
-        {QStringLiteral("inetcache"), QStringLiteral("IE缓存"), QStringLiteral("INetCache"), joinPath(local, {QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("INetCache")})},
-        {QStringLiteral("cookies"), QStringLiteral("Cookies"), QStringLiteral("INetCookies"), joinPath(local, {QStringLiteral("Microsoft"), QStringLiteral("Windows"), QStringLiteral("INetCookies")})},
-        {QStringLiteral("temp"), QStringLiteral("临时文件"), QStringLiteral("Temp"), joinPath(local, {QStringLiteral("Temp")})},
-        {QStringLiteral("contacts"), QStringLiteral("联系人"), QStringLiteral("Contacts"), joinPath(home, {QStringLiteral("Contacts")})},
         {QStringLiteral("downloads"), QStringLiteral("下载"), QStringLiteral("Downloads"), joinPath(home, {QStringLiteral("Downloads")})},
-        {QStringLiteral("links"), QStringLiteral("链接"), QStringLiteral("Links"), joinPath(home, {QStringLiteral("Links")})},
-        {QStringLiteral("searches"), QStringLiteral("搜索"), QStringLiteral("Searches"), joinPath(home, {QStringLiteral("Searches")})},
         {QStringLiteral("videos"), QStringLiteral("我的视频"), QStringLiteral("Videos"), joinPath(home, {QStringLiteral("Videos")})},
         {QStringLiteral("pictures"), QStringLiteral("我的图片"), QStringLiteral("Pictures"), joinPath(home, {QStringLiteral("Pictures")})},
-        {QStringLiteral("music"), QStringLiteral("我的音乐"), QStringLiteral("Music"), joinPath(home, {QStringLiteral("Music")})},
-        {QStringLiteral("savedgames"), QStringLiteral("保存的游戏"), QStringLiteral("Saved Games"), joinPath(home, {QStringLiteral("Saved Games")})},
+        {QStringLiteral("appdata_cache"), QStringLiteral("AppData 软件缓存（微信/QQ）"), QStringLiteral("AppData-Tencent"), joinPath(local, {QStringLiteral("Tencent")})},
+        {QStringLiteral("temp"), QStringLiteral("Temp 系统临时文件夹"), QStringLiteral("Temp"), joinPath(local, {QStringLiteral("Temp")})},
     };
 }
 
@@ -473,6 +432,11 @@ FileOperationResult FileManagementEngine::migratePersonalFolder(const QString& f
         }
         return result;
     }
+    if (!updateMigrationRedirect(folder, target, &result)) {
+        removeJunction(folder.path, &result);
+        rollbackMigration(target, folder.path);
+        return result;
+    }
     result.affectedPaths.append(junction.affectedPaths);
     result.affectedPaths.push_back(target);
     result.affectedPaths.push_back(folder.path);
@@ -493,6 +457,9 @@ FileOperationResult FileManagementEngine::restorePersonalFolder(const QString& f
     const QString target = junctionTarget(folder.path);
     if (target.isEmpty()) {
         result.errors.push_back(QStringLiteral("无法读取迁移目标: %1").arg(folder.path));
+        return result;
+    }
+    if (!updateMigrationRedirect(folder, folder.path, &result)) {
         return result;
     }
     if (!removeJunction(folder.path, &result)) {
@@ -638,7 +605,7 @@ qint64 FileManagementEngine::directorySize(const QString& path, int* fileCount) 
             continue;
         }
         const QFileInfoList entries = QDir(current).entryInfoList(
-            QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks
+            QDir::Files | QDir::Dirs | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot | QDir::NoSymLinks
         );
         for (const QFileInfo& info : entries) {
             if (info.isDir()) {
@@ -914,6 +881,83 @@ bool FileManagementEngine::ensureSupportsJunction(const QString& targetRoot, con
     Q_UNUSED(result);
 #endif
     return true;
+}
+
+bool FileManagementEngine::updateMigrationRedirect(
+    const MigrationFolder& folder,
+    const QString& path,
+    FileOperationResult* result
+) const {
+#ifdef Q_OS_WIN
+    if (folder.key == QStringLiteral("temp")) {
+        QSettings environment(
+            QStringLiteral("HKEY_CURRENT_USER\\Environment"),
+            QSettings::NativeFormat
+        );
+        environment.setValue(QStringLiteral("TEMP"), QDir::toNativeSeparators(path));
+        environment.setValue(QStringLiteral("TMP"), QDir::toNativeSeparators(path));
+        environment.sync();
+        if (environment.status() != QSettings::NoError) {
+            if (result) {
+                result->errors.push_back(QStringLiteral("更新 TEMP/TMP 环境变量失败。"));
+            }
+            return false;
+        }
+        DWORD_PTR broadcastResult = 0;
+        SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, reinterpret_cast<LPARAM>(L"Environment"), SMTO_ABORTIFHUNG, 3000, &broadcastResult);
+        return true;
+    }
+
+    const QString valueName = personalFolderRegistryValue(folder.key);
+    if (valueName.isEmpty()) {
+        return true;
+    }
+    const QString nativePath = QDir::toNativeSeparators(path);
+    QSettings userShell(
+        QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders"),
+        QSettings::NativeFormat
+    );
+    QSettings shell(
+        QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders"),
+        QSettings::NativeFormat
+    );
+    userShell.setValue(valueName, nativePath);
+    shell.setValue(valueName, nativePath);
+    userShell.sync();
+    shell.sync();
+    if (userShell.status() != QSettings::NoError || shell.status() != QSettings::NoError) {
+        if (result) {
+            result->errors.push_back(QStringLiteral("更新系统个人文件夹注册表路径失败: %1").arg(folder.name));
+        }
+        return false;
+    }
+    DWORD_PTR broadcastResult = 0;
+    SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, reinterpret_cast<LPARAM>(L"Environment"), SMTO_ABORTIFHUNG, 3000, &broadcastResult);
+#else
+    Q_UNUSED(folder);
+    Q_UNUSED(path);
+    Q_UNUSED(result);
+#endif
+    return true;
+}
+
+QString FileManagementEngine::personalFolderRegistryValue(const QString& folderKey) {
+    if (folderKey == QStringLiteral("desktop")) {
+        return QStringLiteral("Desktop");
+    }
+    if (folderKey == QStringLiteral("documents")) {
+        return QStringLiteral("Personal");
+    }
+    if (folderKey == QStringLiteral("downloads")) {
+        return QStringLiteral("{374DE290-123F-4565-9164-39C4925E467B}");
+    }
+    if (folderKey == QStringLiteral("pictures")) {
+        return QStringLiteral("My Pictures");
+    }
+    if (folderKey == QStringLiteral("videos")) {
+        return QStringLiteral("My Video");
+    }
+    return {};
 }
 
 QString FileManagementEngine::junctionTarget(const QString& path) const {

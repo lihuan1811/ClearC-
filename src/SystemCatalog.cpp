@@ -1,517 +1,341 @@
 #include "SystemCatalog.h"
 
-#include <QDir>
-#include <QFileInfo>
 #include <QProcess>
-#include <QRegularExpression>
-#include <QSettings>
-#include <QSysInfo>
-
-#include <algorithm>
 
 namespace {
 
-struct ProcessUsageRow {
-    QString name;
-    QString pid;
-    QString session;
-    QString memoryText;
-    qint64 memoryKb = 0;
-};
-
-OptimizerItem item(
-    const QString& id,
-    const QString& tab,
-    const QString& title,
-    const QString& location,
-    const QString& description,
-    const QString& command,
-    const QString& actionLabel = QStringLiteral("处理"),
-    bool recommended = true,
-    bool checkOnly = false,
-    const QStringList& children = {}
+WindowsOptimizationCommand command(
+    const QString& executable,
+    const QStringList& arguments,
+    const QString& description
 ) {
-    OptimizerItem row;
-    row.id = id;
-    row.tab = tab;
-    row.title = title;
-    row.location = location;
-    row.description = description;
-    row.command = command;
-    row.actionLabel = actionLabel;
-    row.recommended = recommended;
-    row.checkOnly = checkOnly;
-    row.children = children;
-    return row;
+    return {executable, arguments, description};
 }
 
-QString quoted(const QString& value) {
-    QString escaped = value;
-    escaped.replace(QStringLiteral("\""), QStringLiteral("\\\""));
-    return QStringLiteral("\"%1\"").arg(escaped);
+WindowsOptimizationAction action(
+    const QString& id,
+    const QString& title,
+    const QString& description,
+    const QString& category,
+    const QString& risk,
+    const QVector<WindowsOptimizationCommand>& commands,
+    const QVector<WindowsOptimizationCommand>& revertCommands = {},
+    bool requiresAdmin = false,
+    bool recommended = true
+) {
+    return {id, title, description, category, risk, commands, revertCommands, requiresAdmin, recommended};
 }
 
-QString startupRegistryLabel(const QString& rootName, const QString& subkey) {
-    const QString scope = rootName == QStringLiteral("HKEY_CURRENT_USER")
-        ? QStringLiteral("当前用户")
-        : QStringLiteral("所有用户");
-    QString type = QStringLiteral("登录启动项");
-    if (subkey.contains(QStringLiteral("RunOnce"), Qt::CaseInsensitive)) {
-        type = QStringLiteral("一次性启动项");
-    } else if (subkey.contains(QStringLiteral("WOW6432Node"), Qt::CaseInsensitive)) {
-        type = QStringLiteral("32位程序启动项");
-    }
-    return QStringLiteral("%1 / %2").arg(scope, type);
+WindowsOptimizationCommand regAdd(
+    const QString& key,
+    const QString& value,
+    const QString& data,
+    const QString& description
+) {
+    return command(
+        QStringLiteral("reg"),
+        {QStringLiteral("add"), key, QStringLiteral("/v"), value, QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), data, QStringLiteral("/f")},
+        description
+    );
 }
 
-QVector<OptimizerItem> windowsStartupRegistryItems() {
-    QVector<OptimizerItem> rows;
-#ifdef Q_OS_WIN
-    struct RegistryLocation {
-        QString rootName;
-        QString shortName;
-        QString subkey;
-    };
-    const QVector<RegistryLocation> locations = {
-        {QStringLiteral("HKEY_CURRENT_USER"), QStringLiteral("HKCU"), QStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Run")},
-        {QStringLiteral("HKEY_CURRENT_USER"), QStringLiteral("HKCU"), QStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce")},
-        {QStringLiteral("HKEY_LOCAL_MACHINE"), QStringLiteral("HKLM"), QStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Run")},
-        {QStringLiteral("HKEY_LOCAL_MACHINE"), QStringLiteral("HKLM"), QStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce")},
-        {QStringLiteral("HKEY_LOCAL_MACHINE"), QStringLiteral("HKLM"), QStringLiteral("Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run")},
-    };
-
-    int counter = 0;
-    for (const RegistryLocation& location : locations) {
-        const QString fullKey = location.rootName + QStringLiteral("\\") + location.subkey;
-        QSettings settings(fullKey, QSettings::NativeFormat);
-        for (const QString& valueName : settings.childKeys()) {
-            const QString command = settings.value(valueName).toString().trimmed();
-            if (valueName.trimmed().isEmpty() || command.isEmpty()) {
-                continue;
-            }
-            rows.push_back(item(
-                QStringLiteral("startup-reg-%1").arg(++counter),
-                QStringLiteral("开机加速"),
-                valueName,
-                QStringLiteral("%1 (%2)").arg(startupRegistryLabel(location.rootName, location.subkey), location.shortName),
-                QStringLiteral("启动命令: %1").arg(command),
-                QStringLiteral("reg delete %1 /v %2 /f").arg(quoted(fullKey), quoted(valueName)),
-                QStringLiteral("禁用"),
-                false,
-                false,
-                {QStringLiteral("来源: %1").arg(fullKey), QStringLiteral("命令: %1").arg(command)}
-            ));
-        }
-    }
-#endif
-    return rows;
-}
-
-QVector<OptimizerItem> windowsStartupFolderItems() {
-    QVector<OptimizerItem> rows;
-#ifdef Q_OS_WIN
-    struct StartupFolder {
-        QString label;
-        QString path;
-    };
-    const QString appData = qEnvironmentVariable("APPDATA");
-    const QString programData = qEnvironmentVariable("ProgramData");
-    QVector<StartupFolder> folders;
-    if (!appData.trimmed().isEmpty()) {
-        folders.push_back(StartupFolder{QStringLiteral("当前用户启动文件夹"), QDir(appData).filePath(QStringLiteral("Microsoft/Windows/Start Menu/Programs/Startup"))});
-    }
-    if (!programData.trimmed().isEmpty()) {
-        folders.push_back(StartupFolder{QStringLiteral("所有用户启动文件夹"), QDir(programData).filePath(QStringLiteral("Microsoft/Windows/Start Menu/Programs/Startup"))});
-    }
-
-    int counter = 0;
-    for (const StartupFolder& folder : folders) {
-        QDir dir(folder.path);
-        if (!dir.exists()) {
-            continue;
-        }
-        const QFileInfoList entries = dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
-        for (const QFileInfo& entry : entries) {
-            rows.push_back(item(
-                QStringLiteral("startup-folder-%1").arg(++counter),
-                QStringLiteral("开机加速"),
-                entry.completeBaseName().isEmpty() ? entry.fileName() : entry.completeBaseName(),
-                folder.label,
-                QDir::toNativeSeparators(entry.absoluteFilePath()),
-                QStringLiteral("explorer /select,%1").arg(quoted(QDir::toNativeSeparators(entry.absoluteFilePath()))),
-                QStringLiteral("定位"),
-                false,
-                false,
-                {QStringLiteral("文件夹: %1").arg(QDir::toNativeSeparators(folder.path))}
-            ));
-        }
-    }
-#endif
-    return rows;
-}
-
-QString processOutput(const QString& executable, const QStringList& arguments, int timeoutMs = 8000) {
-    QProcess process;
-    process.start(executable, arguments);
-    if (!process.waitForFinished(timeoutMs)) {
-        process.kill();
-        process.waitForFinished();
-    }
-    return QString::fromLocal8Bit(process.readAllStandardOutput());
-}
-
-QStringList parseCsvLine(const QString& line) {
-    QStringList columns;
-    QString current;
-    bool quotedField = false;
-    for (int i = 0; i < line.size(); ++i) {
-        const QChar ch = line.at(i);
-        if (ch == QLatin1Char('"')) {
-            if (quotedField && i + 1 < line.size() && line.at(i + 1) == QLatin1Char('"')) {
-                current.append(ch);
-                ++i;
-            } else {
-                quotedField = !quotedField;
-            }
-            continue;
-        }
-        if (ch == QLatin1Char(',') && !quotedField) {
-            columns.push_back(current.trimmed());
-            current.clear();
-            continue;
-        }
-        current.append(ch);
-    }
-    columns.push_back(current.trimmed());
-    return columns;
-}
-
-qint64 tasklistMemoryKb(const QString& value) {
-    QString digits;
-    for (const QChar& ch : value) {
-        if (ch.isDigit()) {
-            digits.append(ch);
-        }
-    }
-    return digits.toLongLong();
-}
-
-QVector<OptimizerItem> windowsMemoryProcessItems() {
-    QVector<OptimizerItem> rows;
-#ifdef Q_OS_WIN
-    const QString output = processOutput(QStringLiteral("tasklist"), {QStringLiteral("/FO"), QStringLiteral("CSV"), QStringLiteral("/NH")});
-    QVector<ProcessUsageRow> processes;
-    for (const QString& line : output.split(QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts)) {
-        const QStringList columns = parseCsvLine(line);
-        if (columns.size() < 5) {
-            continue;
-        }
-        ProcessUsageRow row;
-        row.name = columns.at(0);
-        row.pid = columns.at(1);
-        row.session = columns.at(2);
-        row.memoryText = columns.at(4);
-        row.memoryKb = tasklistMemoryKb(row.memoryText);
-        processes.push_back(row);
-    }
-    std::sort(processes.begin(), processes.end(), [](const ProcessUsageRow& a, const ProcessUsageRow& b) {
-        return a.memoryKb > b.memoryKb;
-    });
-
-    const int limit = qMin(60, processes.size());
-    for (int i = 0; i < limit; ++i) {
-        const ProcessUsageRow& process = processes.at(i);
-        rows.push_back(item(
-            QStringLiteral("memory-process-%1").arg(process.pid),
-            QStringLiteral("运行内存"),
-            QStringLiteral("%1 (PID %2)").arg(process.name, process.pid),
-            QStringLiteral("运行进程 / %1").arg(process.session),
-            QStringLiteral("内存占用: %1").arg(process.memoryText),
-            QStringLiteral("taskkill /PID %1 /F").arg(process.pid),
-            QStringLiteral("结束"),
-            false,
-            false,
-            {QStringLiteral("进程: %1").arg(process.name), QStringLiteral("PID: %1").arg(process.pid)}
-        ));
-    }
-#endif
-    return rows;
+WindowsOptimizationCommand regDelete(
+    const QString& key,
+    const QString& value,
+    const QString& description
+) {
+    return command(
+        QStringLiteral("reg"),
+        {QStringLiteral("delete"), key, QStringLiteral("/v"), value, QStringLiteral("/f")},
+        description
+    );
 }
 
 }  // namespace
 
-QVector<OptimizerItem> SystemCatalog::populateStartupItems() {
-    QVector<OptimizerItem> rows = windowsStartupRegistryItems();
-    rows += windowsStartupFolderItems();
-    if (rows.isEmpty()) {
-        rows = fallbackStartupItems();
-    }
-    rows.push_back(item(
-        QStringLiteral("startup-user-run"),
-        QStringLiteral("开机加速"),
-        QStringLiteral("检查当前用户 Run 启动项"),
-        QStringLiteral("当前用户 / 登录启动项"),
-        QStringLiteral("枚举 HKCU Run，作为启动项诊断入口。"),
-        QStringLiteral("reg query \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\""),
-        QStringLiteral("检查"),
-        true,
-        true,
-        {QStringLiteral("HKCU Run"), QStringLiteral("启动项")}
-    ));
-    rows.push_back(item(
-        QStringLiteral("startup-machine-run"),
-        QStringLiteral("开机加速"),
-        QStringLiteral("检查所有用户 Run 启动项"),
-        QStringLiteral("所有用户 / 登录启动项"),
-        QStringLiteral("枚举 HKLM Run，需要管理员权限查看和处理。"),
-        QStringLiteral("reg query \"HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\""),
-        QStringLiteral("检查"),
-        true,
-        true,
-        {QStringLiteral("HKLM Run"), QStringLiteral("管理员权限")}
-    ));
-    rows.push_back(item(
-        QStringLiteral("startup-folder"),
-        QStringLiteral("开机加速"),
-        QStringLiteral("打开启动文件夹"),
-        QStringLiteral("启动文件夹"),
-        QStringLiteral("查看当前用户启动文件夹中的快捷方式。"),
-        QStringLiteral("explorer \"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\""),
-        QStringLiteral("打开"),
-        true,
-        false,
-        {QStringLiteral("Startup Folder")}
-    ));
-    return rows;
-}
-
-QVector<OptimizerItem> SystemCatalog::populateMemoryItems() {
-    QVector<OptimizerItem> rows = windowsMemoryProcessItems();
-    if (rows.isEmpty()) {
-        rows = fallbackMemoryItems();
-    }
-    rows.push_back(item(
-        QStringLiteral("memory-tasklist"),
-        QStringLiteral("运行内存"),
-        QStringLiteral("刷新进程内存列表"),
-        QStringLiteral("tasklist /FO CSV"),
-        QStringLiteral("按进程名、PID、内存占用细分显示。"),
-        QStringLiteral("tasklist /v"),
-        QStringLiteral("刷新"),
-        true,
-        true
-    ));
-    rows.push_back(item(
-        QStringLiteral("memory-empty-standby"),
-        QStringLiteral("运行内存"),
-        QStringLiteral("释放系统工作集"),
-        QStringLiteral("PowerShell"),
-        QStringLiteral("触发系统内存整理，适合轻量释放后台缓存。"),
-        QStringLiteral("powershell -NoProfile -Command \"Get-Process | Out-Null\""),
-        QStringLiteral("执行"),
-        false
-    ));
-    return rows;
-}
-
-QVector<OptimizerItem> SystemCatalog::populateSystemOptimizationItems() {
+QVector<WindowsOptimizationAction> SystemCatalog::officeOptimizationActions() {
     return {
-        item(QStringLiteral("flush-dns"), QStringLiteral("系统优化"), QStringLiteral("刷新 DNS 解析缓存"),
-             QStringLiteral("DNS Client"), QStringLiteral("清空本机 DNS 缓存。"),
-             QStringLiteral("ipconfig /flushdns"), QStringLiteral("执行"), true, false,
-             {QStringLiteral("DNS"), QStringLiteral("ipconfig /flushdns")}),
-        item(QStringLiteral("process-idle"), QStringLiteral("系统优化"), QStringLiteral("执行系统空闲任务整理"),
-             QStringLiteral("advapi32 ProcessIdleTasks"), QStringLiteral("触发 Windows 空闲维护队列。"),
-             QStringLiteral("rundll32.exe advapi32.dll,ProcessIdleTasks"), QStringLiteral("执行")),
-        item(QStringLiteral("boot-prefetch"), QStringLiteral("系统优化"), QStringLiteral("Windows 启动优化功能（碎片整理预取）"),
-             QStringLiteral("HKLM\\SOFTWARE\\Microsoft\\Dfrg\\BootOptimizeFunction"),
-             QStringLiteral("启用启动优化并可执行 defrag C: /b /u。"),
-             QStringLiteral("reg add \"HKLM\\SOFTWARE\\Microsoft\\Dfrg\\BootOptimizeFunction\" /v Enable /t REG_SZ /d Y /f"),
-             QStringLiteral("优化")),
-        item(QStringLiteral("boot-prefetch-run"), QStringLiteral("系统优化"), QStringLiteral("执行启动预取整理"),
-             QStringLiteral("defrag"), QStringLiteral("执行 Windows 启动文件布局优化。"),
-             QStringLiteral("defrag C: /b /u"), QStringLiteral("执行"), false),
-        item(QStringLiteral("store-autodownload"), QStringLiteral("系统优化"), QStringLiteral("禁用自动更新商店应用"),
-             QStringLiteral("WindowsStore"), QStringLiteral("减少后台应用更新负载。"),
-             QStringLiteral("reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\WindowsStore\" /v AutoDownload /t REG_DWORD /d 2 /f"),
-             QStringLiteral("优化")),
-        item(QStringLiteral("content-delivery"), QStringLiteral("系统优化"), QStringLiteral("禁止自动安装推荐的应用程序"),
-             QStringLiteral("ContentDeliveryManager"), QStringLiteral("关闭推荐应用和内容投放。"),
-             QStringLiteral("reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager\" /v SilentInstalledAppsEnabled /t REG_DWORD /d 0 /f"),
-             QStringLiteral("优化")),
-        item(QStringLiteral("fso"), QStringLiteral("系统优化"), QStringLiteral("全局全屏优化（FSO）"),
-             QStringLiteral("GameConfigStore"), QStringLiteral("降低部分游戏全屏输入延迟。"),
-             QStringLiteral("reg add \"HKCU\\System\\GameConfigStore\" /v GameDVR_FSEBehaviorMode /t REG_DWORD /d 2 /f"),
-             QStringLiteral("优化"), false),
-        item(QStringLiteral("delivery-optimization"), QStringLiteral("系统优化"), QStringLiteral("交付优化"),
-             QStringLiteral("DoSvc"), QStringLiteral("停止交付优化服务并改成按需启动。"),
-             QStringLiteral("sc stop DoSvc & sc config DoSvc start= demand"),
-             QStringLiteral("优化")),
+        action(
+            QStringLiteral("office_startup_delay"),
+            QStringLiteral("关闭启动应用延迟"),
+            QStringLiteral("缩短登录后启动项等待时间，不删除任何启动项。"),
+            QStringLiteral("开机启动"),
+            QStringLiteral("安全"),
+            {regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Serialize"), QStringLiteral("StartupDelayInMSec"), QStringLiteral("0"), QStringLiteral("关闭启动应用延迟"))},
+            {regDelete(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Serialize"), QStringLiteral("StartupDelayInMSec"), QStringLiteral("恢复启动应用延迟默认"))}
+        ),
+        action(
+            QStringLiteral("office_content_delivery"),
+            QStringLiteral("关闭系统推荐与广告内容"),
+            QStringLiteral("关闭 Windows 推荐应用、提示和内容投递开关。"),
+            QStringLiteral("广告弹窗"),
+            QStringLiteral("安全"),
+            {
+                regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager"), QStringLiteral("SilentInstalledAppsEnabled"), QStringLiteral("0"), QStringLiteral("关闭静默推荐应用")),
+                regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager"), QStringLiteral("SystemPaneSuggestionsEnabled"), QStringLiteral("0"), QStringLiteral("关闭开始菜单建议")),
+            },
+            {
+                regDelete(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager"), QStringLiteral("SilentInstalledAppsEnabled"), QStringLiteral("恢复推荐应用默认")),
+                regDelete(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager"), QStringLiteral("SystemPaneSuggestionsEnabled"), QStringLiteral("恢复系统建议默认")),
+            }
+        ),
+        action(
+            QStringLiteral("office_animation"),
+            QStringLiteral("适度精简窗口动画"),
+            QStringLiteral("关闭透明效果，保留常用界面能力。"),
+            QStringLiteral("视觉效果"),
+            QStringLiteral("安全"),
+            {regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), QStringLiteral("EnableTransparency"), QStringLiteral("0"), QStringLiteral("关闭透明效果"))},
+            {regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), QStringLiteral("EnableTransparency"), QStringLiteral("1"), QStringLiteral("恢复透明效果"))}
+        ),
+        action(
+            QStringLiteral("office_background_cache"),
+            QStringLiteral("清理后台临时缓存"),
+            QStringLiteral("只清理当前用户临时目录中可删除的文件。"),
+            QStringLiteral("后台缓存"),
+            QStringLiteral("安全"),
+            {command(QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), QStringLiteral("Get-ChildItem $env:TEMP -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue")}, QStringLiteral("清理当前用户临时缓存"))}
+        ),
+        action(
+            QStringLiteral("office_network"),
+            QStringLiteral("刷新网络解析缓存"),
+            QStringLiteral("刷新 DNS 缓存，修复常见域名解析异常。"),
+            QStringLiteral("网络"),
+            QStringLiteral("安全"),
+            {command(QStringLiteral("ipconfig"), {QStringLiteral("/flushdns")}, QStringLiteral("刷新 DNS 缓存"))}
+        ),
+        action(
+            QStringLiteral("office_idle_service"),
+            QStringLiteral("闲置地图服务改为按需"),
+            QStringLiteral("将 MapsBroker 改为按需启动，不删除服务。"),
+            QStringLiteral("系统服务"),
+            QStringLiteral("安全"),
+            {command(QStringLiteral("sc"), {QStringLiteral("config"), QStringLiteral("MapsBroker"), QStringLiteral("start="), QStringLiteral("demand")}, QStringLiteral("地图服务改为按需"))},
+            {command(QStringLiteral("sc"), {QStringLiteral("config"), QStringLiteral("MapsBroker"), QStringLiteral("start="), QStringLiteral("auto")}, QStringLiteral("恢复地图服务自动启动"))},
+            true
+        ),
     };
 }
 
-QVector<OptimizerItem> SystemCatalog::populatePrivacyItems() {
-    return {
-        item(QStringLiteral("privacy-activity"), QStringLiteral("隐私清理"), QStringLiteral("关闭活动历史记录"),
-             QStringLiteral("ActivityFeed"), QStringLiteral("减少 Windows 活动历史记录。"),
-             QStringLiteral("reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\System\" /v EnableActivityFeed /t REG_DWORD /d 0 /f")),
-        item(QStringLiteral("privacy-tailored"), QStringLiteral("隐私清理"), QStringLiteral("关闭个性化广告 ID"),
-             QStringLiteral("AdvertisingInfo"), QStringLiteral("关闭应用广告 ID。"),
-             QStringLiteral("reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\AdvertisingInfo\" /v Enabled /t REG_DWORD /d 0 /f")),
-        item(QStringLiteral("privacy-diagnostics"), QStringLiteral("隐私清理"), QStringLiteral("减少诊断数据"),
-             QStringLiteral("DataCollection"), QStringLiteral("将诊断数据降到基础级别。"),
-             QStringLiteral("reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\DataCollection\" /v AllowTelemetry /t REG_DWORD /d 0 /f")),
-        item(QStringLiteral("privacy-recent"), QStringLiteral("隐私清理"), QStringLiteral("清理最近文档记录"),
-             QStringLiteral("Recent"), QStringLiteral("删除最近打开文件记录。"),
-             QStringLiteral("del /q \"%APPDATA%\\Microsoft\\Windows\\Recent\\*\""), QStringLiteral("清理")),
-        item(QStringLiteral("privacy-browser-account-extensions"), QStringLiteral("隐私清理"), QStringLiteral("浏览器账号与插件数据"),
-             QStringLiteral("Chrome/Edge/Firefox Profile"),
-             QStringLiteral("包含浏览器账号、插件和扩展配置，只提供查看入口，需用户单独确认。"),
-             QStringLiteral("explorer \"%LOCALAPPDATA%\\Google\\Chrome\\User Data\\Default\""),
-             QStringLiteral("查看"), false, true,
-             {QStringLiteral("%LOCALAPPDATA%\\Google\\Chrome\\User Data\\Default\\Extensions"),
-              QStringLiteral("%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\Default\\Extensions"),
-              QStringLiteral("%APPDATA%\\Mozilla\\Firefox\\Profiles")}),
+QVector<WindowsOptimizationAction> SystemCatalog::gamingOptimizationActions() {
+    QVector<WindowsOptimizationAction> actions = officeOptimizationActions();
+    actions += QVector<WindowsOptimizationAction>{
+        action(
+            QStringLiteral("gaming_power"),
+            QStringLiteral("切换高性能电源并关闭 CPU 节能"),
+            QStringLiteral("启用高性能计划，并把交流供电时处理器最低状态设为 100%。"),
+            QStringLiteral("电源与 CPU"),
+            QStringLiteral("谨慎"),
+            {
+                command(QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_MIN")}, QStringLiteral("启用高性能电源计划")),
+                command(QStringLiteral("powercfg"), {QStringLiteral("/setacvalueindex"), QStringLiteral("SCHEME_CURRENT"), QStringLiteral("SUB_PROCESSOR"), QStringLiteral("PROCTHROTTLEMIN"), QStringLiteral("100")}, QStringLiteral("关闭交流供电 CPU 节能")),
+            },
+            {
+                command(QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_BALANCED")}, QStringLiteral("恢复平衡电源计划")),
+                command(QStringLiteral("powercfg"), {QStringLiteral("/setacvalueindex"), QStringLiteral("SCHEME_CURRENT"), QStringLiteral("SUB_PROCESSOR"), QStringLiteral("PROCTHROTTLEMIN"), QStringLiteral("5")}, QStringLiteral("恢复 CPU 节能")),
+            },
+            true,
+            false
+        ),
+        action(
+            QStringLiteral("gaming_visuals"),
+            QStringLiteral("关闭系统动画"),
+            QStringLiteral("调整为最佳性能视觉效果，减少桌面动画开销。"),
+            QStringLiteral("视觉效果"),
+            QStringLiteral("谨慎"),
+            {regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VisualEffects"), QStringLiteral("VisualFXSetting"), QStringLiteral("2"), QStringLiteral("启用最佳性能视觉效果"))},
+            {regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VisualEffects"), QStringLiteral("VisualFXSetting"), QStringLiteral("0"), QStringLiteral("恢复 Windows 自动选择视觉效果"))},
+            false,
+            false
+        ),
+        action(
+            QStringLiteral("gaming_notifications"),
+            QStringLiteral("关闭系统通知"),
+            QStringLiteral("关闭通知中心弹窗，可能错过办公提醒。"),
+            QStringLiteral("通知"),
+            QStringLiteral("谨慎"),
+            {regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications"), QStringLiteral("ToastEnabled"), QStringLiteral("0"), QStringLiteral("关闭通知弹窗"))},
+            {regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications"), QStringLiteral("ToastEnabled"), QStringLiteral("1"), QStringLiteral("恢复通知弹窗"))},
+            false,
+            false
+        ),
+        action(
+            QStringLiteral("gaming_restore"),
+            QStringLiteral("禁用系统还原"),
+            QStringLiteral("关闭 C 盘系统保护；不会主动删除已有还原点。"),
+            QStringLiteral("系统还原"),
+            QStringLiteral("高危"),
+            {command(QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), QStringLiteral("Disable-ComputerRestore -Drive 'C:\\'")}, QStringLiteral("禁用 C 盘系统还原"))},
+            {command(QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), QStringLiteral("Enable-ComputerRestore -Drive 'C:\\'")}, QStringLiteral("恢复 C 盘系统还原"))},
+            true,
+            false
+        ),
+        action(
+            QStringLiteral("gaming_hibernate"),
+            QStringLiteral("关闭休眠"),
+            QStringLiteral("释放 hiberfil.sys，占用休眠和快速启动能力。"),
+            QStringLiteral("休眠"),
+            QStringLiteral("谨慎"),
+            {command(QStringLiteral("powercfg"), {QStringLiteral("/hibernate"), QStringLiteral("off")}, QStringLiteral("关闭休眠"))},
+            {command(QStringLiteral("powercfg"), {QStringLiteral("/hibernate"), QStringLiteral("on")}, QStringLiteral("恢复休眠"))},
+            true,
+            false
+        ),
+        action(
+            QStringLiteral("gaming_index"),
+            QStringLiteral("禁用磁盘索引"),
+            QStringLiteral("停止 Windows Search 并禁用服务，文件搜索会变慢。"),
+            QStringLiteral("磁盘索引"),
+            QStringLiteral("谨慎"),
+            {command(QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("sc stop WSearch & sc config WSearch start= disabled")}, QStringLiteral("禁用 Windows Search"))},
+            {command(QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("sc config WSearch start= delayed-auto & sc start WSearch")}, QStringLiteral("恢复 Windows Search"))},
+            true,
+            false
+        ),
     };
+    return actions;
 }
 
-QVector<OptimizerItem> SystemCatalog::populateRegistryItems() {
+QVector<WindowsOptimizationAction> SystemCatalog::advancedControlActions() {
     return {
-        item(QStringLiteral("registry-orphans"), QStringLiteral("注册表清理"), QStringLiteral("无效卸载项检查"),
-             QStringLiteral("Uninstall Registry"), QStringLiteral("检查无效软件卸载项。"),
-             QStringLiteral("reg query \"HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\""),
-             QStringLiteral("检查"), true, true),
-        item(QStringLiteral("registry-app-paths"), QStringLiteral("注册表清理"), QStringLiteral("无效 App Paths 检查"),
-             QStringLiteral("App Paths"), QStringLiteral("检查缺失程序路径。"),
-             QStringLiteral("reg query \"HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\""),
-             QStringLiteral("检查"), true, true),
-        item(QStringLiteral("registry-startup-approved"), QStringLiteral("注册表清理"), QStringLiteral("启动批准记录检查"),
-             QStringLiteral("StartupApproved"), QStringLiteral("检查旧启动项批准状态。"),
-             QStringLiteral("reg query \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\""),
-             QStringLiteral("检查"), true, true),
-    };
-}
-
-QVector<BxItem> SystemCatalog::bxItems() {
-    return {
-        {QStringLiteral("BX(优化)"), QStringLiteral("DNS 缓存刷新"), QStringLiteral("基本/最佳都会刷新 DNS，修复解析异常。"), QStringLiteral("ipconfig /flushdns"), QStringLiteral("已优化"), QStringLiteral("低"), true, true},
-        {QStringLiteral("BX(优化)"), QStringLiteral("全局全屏优化"), QStringLiteral("最佳模式关闭 FSO，降低部分游戏输入延迟。"), QStringLiteral("reg add \"HKCU\\System\\GameConfigStore\" /v GameDVR_FSEBehaviorMode /t REG_DWORD /d 2 /f"), QStringLiteral("已优化"), QStringLiteral("中"), false, true},
-        {QStringLiteral("BX(优化)"), QStringLiteral("交付优化"), QStringLiteral("停止 DoSvc 并改为按需启动。"), QStringLiteral("sc stop DoSvc & sc config DoSvc start= demand"), QStringLiteral("按需"), QStringLiteral("中"), true, true},
-        {QStringLiteral("服务"), QStringLiteral("SysMain 服务"), QStringLiteral("降低机械盘以外的预读取后台负载。"), QStringLiteral("sc stop SysMain & sc config SysMain start= demand"), QStringLiteral("按需"), QStringLiteral("中"), false, true},
-        {QStringLiteral("游戏"), QStringLiteral("HAGS 硬件加速 GPU 调度"), QStringLiteral("启用 Windows 图形调度策略。"), QStringLiteral("reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers\" /v HwSchMode /t REG_DWORD /d 2 /f"), QStringLiteral("启用"), QStringLiteral("中"), false, true},
-        {QStringLiteral("隐私"), QStringLiteral("活动历史记录"), QStringLiteral("关闭活动历史记录上传。"), QStringLiteral("reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\System\" /v EnableActivityFeed /t REG_DWORD /d 0 /f"), QStringLiteral("关闭"), QStringLiteral("低"), true, true},
+        action(
+            QStringLiteral("windows_update_disable"),
+            QStringLiteral("Windows 自动更新：一键禁用"),
+            QStringLiteral("停止并禁用 Windows Update、BITS 和 Update Orchestrator 服务。"),
+            QStringLiteral("Windows 自动更新"),
+            QStringLiteral("高危"),
+            {command(QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("sc stop wuauserv & sc stop bits & sc stop UsoSvc & sc config wuauserv start= disabled & sc config bits start= disabled & sc config UsoSvc start= disabled")}, QStringLiteral("禁用 Windows 自动更新"))},
+            {command(QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("sc config wuauserv start= demand & sc config bits start= delayed-auto & sc config UsoSvc start= demand & sc start bits & sc start wuauserv")}, QStringLiteral("恢复 Windows 自动更新"))},
+            true,
+            false
+        ),
+        action(
+            QStringLiteral("windows_update_enable"),
+            QStringLiteral("Windows 自动更新：一键开启"),
+            QStringLiteral("恢复更新相关服务并立即启动。"),
+            QStringLiteral("Windows 自动更新"),
+            QStringLiteral("安全"),
+            {command(QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("sc config wuauserv start= demand & sc config bits start= delayed-auto & sc config UsoSvc start= demand & sc start bits & sc start wuauserv")}, QStringLiteral("开启 Windows 自动更新"))},
+            {},
+            true
+        ),
+        action(
+            QStringLiteral("defender_temporary"),
+            QStringLiteral("Defender：临时终止实时防护"),
+            QStringLiteral("临时关闭实时防护，系统或策略可能自动恢复。"),
+            QStringLiteral("Windows 安全中心"),
+            QStringLiteral("高危"),
+            {command(QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), QStringLiteral("Set-MpPreference -DisableRealtimeMonitoring $true")}, QStringLiteral("临时关闭 Defender 实时防护"))},
+            {command(QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), QStringLiteral("Set-MpPreference -DisableRealtimeMonitoring $false")}, QStringLiteral("恢复 Defender 实时防护"))},
+            true,
+            false
+        ),
+        action(
+            QStringLiteral("defender_permanent"),
+            QStringLiteral("Defender：永久禁用防护"),
+            QStringLiteral("写入策略并停止 Defender 服务；受防篡改保护时可能被系统拒绝。"),
+            QStringLiteral("Windows 安全中心"),
+            QStringLiteral("高危"),
+            {
+                regAdd(QStringLiteral("HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender"), QStringLiteral("DisableAntiSpyware"), QStringLiteral("1"), QStringLiteral("写入 Defender 禁用策略")),
+                regAdd(QStringLiteral("HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\\Real-Time Protection"), QStringLiteral("DisableRealtimeMonitoring"), QStringLiteral("1"), QStringLiteral("写入实时防护禁用策略")),
+                command(QStringLiteral("sc"), {QStringLiteral("stop"), QStringLiteral("WinDefend")}, QStringLiteral("停止 Defender 服务")),
+            },
+            {
+                regDelete(QStringLiteral("HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender"), QStringLiteral("DisableAntiSpyware"), QStringLiteral("删除 Defender 禁用策略")),
+                regDelete(QStringLiteral("HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\\Real-Time Protection"), QStringLiteral("DisableRealtimeMonitoring"), QStringLiteral("删除实时防护禁用策略")),
+                command(QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("sc config WinDefend start= auto & sc start WinDefend")}, QStringLiteral("恢复 Defender 服务")),
+            },
+            true,
+            false
+        ),
+        action(
+            QStringLiteral("defender_restore"),
+            QStringLiteral("Defender：一键恢复开启"),
+            QStringLiteral("删除本工具写入的禁用策略并恢复实时防护。"),
+            QStringLiteral("Windows 安全中心"),
+            QStringLiteral("安全"),
+            {
+                regDelete(QStringLiteral("HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender"), QStringLiteral("DisableAntiSpyware"), QStringLiteral("删除 Defender 禁用策略")),
+                regDelete(QStringLiteral("HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\\Real-Time Protection"), QStringLiteral("DisableRealtimeMonitoring"), QStringLiteral("删除实时防护禁用策略")),
+                command(QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), QStringLiteral("Set-MpPreference -DisableRealtimeMonitoring $false")}, QStringLiteral("恢复实时防护")),
+                command(QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("sc config WinDefend start= auto & sc start WinDefend")}, QStringLiteral("恢复 Defender 服务")),
+            },
+            {},
+            true
+        ),
+        action(
+            QStringLiteral("edge_install"),
+            QStringLiteral("Edge：一键静默安装"),
+            QStringLiteral("从微软官方地址下载稳定版安装器并静默安装。"),
+            QStringLiteral("Edge 工具箱"),
+            QStringLiteral("谨慎"),
+            {command(QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"), QStringLiteral("-Command"), QStringLiteral("$u='https://go.microsoft.com/fwlink/?linkid=2109047&Channel=Stable&language=zh-cn'; $p=Join-Path $env:TEMP 'MicrosoftEdgeSetup.exe'; Invoke-WebRequest $u -OutFile $p; Start-Process $p -ArgumentList '/silent /install' -Wait")}, QStringLiteral("下载并安装 Microsoft Edge"))},
+            {},
+            true,
+            false
+        ),
+        action(
+            QStringLiteral("edge_remove"),
+            QStringLiteral("Edge：一键彻底删除"),
+            QStringLiteral("调用 Edge 官方卸载器并移除当前用户 Appx 包。"),
+            QStringLiteral("Edge 工具箱"),
+            QStringLiteral("高危"),
+            {command(QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"), QStringLiteral("-Command"), QStringLiteral("$s=Get-ChildItem '${env:ProgramFiles(x86)}\\Microsoft\\Edge\\Application\\*\\Installer\\setup.exe' -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1; if($s){Start-Process $s.FullName -ArgumentList '--uninstall --system-level --verbose-logging --force-uninstall' -Wait}; Get-AppxPackage *MicrosoftEdge* | Remove-AppxPackage -ErrorAction SilentlyContinue")}, QStringLiteral("卸载 Microsoft Edge"))},
+            {},
+            true,
+            false
+        ),
+        action(
+            QStringLiteral("browser_homepage_fix"),
+            QStringLiteral("一键修复浏览器主页篡改"),
+            QStringLiteral("终止常见劫持进程、清理快捷方式恶意参数和浏览器策略，并重置 DNS/Winsock。"),
+            QStringLiteral("浏览器修复"),
+            QStringLiteral("谨慎"),
+            {
+                command(QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"), QStringLiteral("-Command"), QStringLiteral("Get-Process chrome,msedge,firefox -ErrorAction SilentlyContinue | Stop-Process -Force; $w=New-Object -ComObject WScript.Shell; $roots=@([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('CommonDesktopDirectory'),[Environment]::GetFolderPath('StartMenu')); Get-ChildItem $roots -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {$l=$w.CreateShortcut($_.FullName); if($l.Arguments -match 'https?://'){$l.Arguments='';$l.Save()}}")}, QStringLiteral("清理浏览器快捷方式恶意参数")),
+                command(QStringLiteral("reg"), {QStringLiteral("delete"), QStringLiteral("HKCU\\Software\\Policies\\Microsoft\\Edge"), QStringLiteral("/f")}, QStringLiteral("清理 Edge 用户策略")),
+                command(QStringLiteral("reg"), {QStringLiteral("delete"), QStringLiteral("HKCU\\Software\\Policies\\Google\\Chrome"), QStringLiteral("/f")}, QStringLiteral("清理 Chrome 用户策略")),
+                command(QStringLiteral("ipconfig"), {QStringLiteral("/flushdns")}, QStringLiteral("刷新 DNS 缓存")),
+                command(QStringLiteral("netsh"), {QStringLiteral("winsock"), QStringLiteral("reset")}, QStringLiteral("重置 Winsock")),
+            },
+            {},
+            true,
+            false
+        ),
     };
 }
 
 QVector<RepairItem> SystemCatalog::repairActions() {
     return {
-        {QStringLiteral("sfc_scan"), QStringLiteral("SFC 系统文件修复"), QStringLiteral("安全"), QStringLiteral("检查并修复受保护系统文件。"), QStringLiteral("sfc /scannow"), true},
-        {QStringLiteral("dism_restore_health"), QStringLiteral("DISM 系统镜像修复"), QStringLiteral("谨慎"), QStringLiteral("使用 DISM 在线修复系统组件仓库。"), QStringLiteral("DISM /Online /Cleanup-Image /RestoreHealth"), false},
-        {QStringLiteral("chkdsk_scan"), QStringLiteral("CHKDSK 磁盘安全扫描"), QStringLiteral("安全"), QStringLiteral("扫描 C 盘文件系统错误。"), QStringLiteral("chkdsk C: /scan"), true},
-        {QStringLiteral("winsock_reset"), QStringLiteral("Winsock 网络重置"), QStringLiteral("安全"), QStringLiteral("重置 Windows 网络套接字目录。"), QStringLiteral("netsh winsock reset"), true},
-        {QStringLiteral("flush_dns"), QStringLiteral("DNS 刷新"), QStringLiteral("安全"), QStringLiteral("清空 DNS 解析缓存。"), QStringLiteral("ipconfig /flushdns"), true},
-        {QStringLiteral("windows_update_reset"), QStringLiteral("系统更新组件修复"), QStringLiteral("谨慎"), QStringLiteral("重建 SoftwareDistribution 和 catroot2。"), QStringLiteral("net stop wuauserv & net stop bits & net stop cryptsvc & ren %systemroot%\\SoftwareDistribution SoftwareDistribution.old & ren %systemroot%\\System32\\catroot2 catroot2.old & net start cryptsvc & net start bits & net start wuauserv"), false},
-        {QStringLiteral("chkdsk_deep"), QStringLiteral("磁盘错误深度修复"), QStringLiteral("谨慎"), QStringLiteral("安排 C 盘深度修复，可能需要重启。"), QStringLiteral("echo Y|chkdsk C: /F /R"), false},
-        {QStringLiteral("cache_reset"), QStringLiteral("缓存重置修复"), QStringLiteral("谨慎"), QStringLiteral("重置微软商店缓存。"), QStringLiteral("wsreset.exe"), false},
+        {QStringLiteral("sfc_scan"), QStringLiteral("SFC 系统文件修复"), QStringLiteral("安全"), QStringLiteral("检查并修复受保护系统文件。"), QStringLiteral("sfc /scannow"), true, false},
+        {QStringLiteral("chkdsk_scan"), QStringLiteral("CHKDSK 磁盘安全扫描"), QStringLiteral("安全"), QStringLiteral("在线扫描 C 盘文件系统错误。"), QStringLiteral("chkdsk C: /scan"), true, false},
+        {QStringLiteral("flush_dns"), QStringLiteral("DNS 刷新"), QStringLiteral("安全"), QStringLiteral("清空 DNS 解析缓存。"), QStringLiteral("ipconfig /flushdns"), true, false},
+        {QStringLiteral("winsock_reset"), QStringLiteral("Winsock 网络重置"), QStringLiteral("安全"), QStringLiteral("重置 Windows 网络套接字目录。"), QStringLiteral("netsh winsock reset"), true, false},
+        {QStringLiteral("dism_restore_health"), QStringLiteral("DISM 系统镜像修复"), QStringLiteral("谨慎"), QStringLiteral("使用微软 DISM 在线修复系统组件仓库。"), QStringLiteral("DISM /Online /Cleanup-Image /RestoreHealth"), false, true},
+        {QStringLiteral("chkdsk_deep"), QStringLiteral("磁盘错误深度修复"), QStringLiteral("谨慎"), QStringLiteral("安排 C 盘深度修复，可能需要重启。"), QStringLiteral("echo Y|chkdsk C: /F /R"), false, true},
+        {QStringLiteral("windows_update_reset"), QStringLiteral("系统更新组件修复"), QStringLiteral("谨慎"), QStringLiteral("重建 SoftwareDistribution 和 catroot2。"), QStringLiteral("net stop wuauserv & net stop bits & net stop cryptsvc & ren %systemroot%\\SoftwareDistribution SoftwareDistribution.old & ren %systemroot%\\System32\\catroot2 catroot2.old & net start cryptsvc & net start bits & net start wuauserv"), false, true},
+        {QStringLiteral("cache_reset"), QStringLiteral("缓存重置修复"), QStringLiteral("谨慎"), QStringLiteral("重置微软商店缓存。"), QStringLiteral("wsreset.exe"), false, true},
     };
 }
 
-QVector<WindowsOptimizationAction> SystemCatalog::windowsOptimizationActions() {
-    return {
-        {QStringLiteral("flush_dns"), QStringLiteral("刷新 DNS 缓存"), QStringLiteral("执行 ipconfig /flushdns，清除本机 DNS 解析缓存。"), QStringLiteral("网络"), QStringLiteral("低风险"),
-         {{QStringLiteral("ipconfig"), {QStringLiteral("/flushdns")}, QStringLiteral("刷新 DNS 缓存")}}, {}},
-        {QStringLiteral("reset_winsock"), QStringLiteral("重置 Winsock"), QStringLiteral("执行 netsh winsock reset，修复网络协议栈异常。"), QStringLiteral("网络"), QStringLiteral("中风险"),
-         {{QStringLiteral("netsh"), {QStringLiteral("winsock"), QStringLiteral("reset")}, QStringLiteral("重置 Winsock")}}, {}, true},
-        {QStringLiteral("reset_tcp_ip"), QStringLiteral("重置 TCP/IP"), QStringLiteral("执行 netsh int ip reset，重置 TCP/IP 配置。"), QStringLiteral("网络"), QStringLiteral("中风险"),
-         {{QStringLiteral("netsh"), {QStringLiteral("int"), QStringLiteral("ip"), QStringLiteral("reset")}, QStringLiteral("重置 TCP/IP")}}, {}, true},
-        {QStringLiteral("high_performance_power"), QStringLiteral("切换高性能电源计划"), QStringLiteral("执行 powercfg /setactive SCHEME_MIN，提高性能优先级。"), QStringLiteral("性能"), QStringLiteral("低风险"),
-         {{QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_MIN")}, QStringLiteral("启用高性能电源计划")}},
-         {{QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_BALANCED")}, QStringLiteral("恢复平衡电源计划")}}},
-        {QStringLiteral("disable_hibernation"), QStringLiteral("关闭休眠释放 hiberfil.sys"), QStringLiteral("执行 powercfg /hibernate off，释放休眠文件。"), QStringLiteral("存储"), QStringLiteral("中风险"),
-         {{QStringLiteral("powercfg"), {QStringLiteral("/hibernate"), QStringLiteral("off")}, QStringLiteral("关闭 Windows 休眠")}},
-         {{QStringLiteral("powercfg"), {QStringLiteral("/hibernate"), QStringLiteral("on")}, QStringLiteral("开启 Windows 休眠")}}, true},
-        {QStringLiteral("disable_game_dvr"), QStringLiteral("关闭 Game DVR 录制"), QStringLiteral("写入 GameDVR 注册表项，减少后台录制占用。"), QStringLiteral("性能"), QStringLiteral("低风险"),
-         {{QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\System\\GameConfigStore"), QStringLiteral("/v"), QStringLiteral("GameDVR_Enabled"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("0"), QStringLiteral("/f")}, QStringLiteral("关闭 GameConfigStore GameDVR")},
-          {QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR"), QStringLiteral("/v"), QStringLiteral("AppCaptureEnabled"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("0"), QStringLiteral("/f")}, QStringLiteral("关闭 AppCapture")}},
-         {{QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\System\\GameConfigStore"), QStringLiteral("/v"), QStringLiteral("GameDVR_Enabled"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("1"), QStringLiteral("/f")}, QStringLiteral("恢复 GameDVR")}}},
-        {QStringLiteral("disable_startup_delay"), QStringLiteral("关闭启动应用延迟"), QStringLiteral("写入 Explorer Serialize，减少登录后启动项延迟。"), QStringLiteral("启动"), QStringLiteral("低风险"),
-         {{QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Serialize"), QStringLiteral("/v"), QStringLiteral("StartupDelayInMSec"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("0"), QStringLiteral("/f")}, QStringLiteral("关闭启动延迟")}}},
-        {QStringLiteral("disable_transparency"), QStringLiteral("关闭透明效果"), QStringLiteral("关闭系统透明效果以降低桌面合成开销。"), QStringLiteral("视觉"), QStringLiteral("低风险"),
-         {{QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), QStringLiteral("/v"), QStringLiteral("EnableTransparency"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("0"), QStringLiteral("/f")}, QStringLiteral("关闭透明效果")}}},
-        {QStringLiteral("enable_storage_sense"), QStringLiteral("开启存储感知"), QStringLiteral("开启 Windows 存储感知自动清理临时文件。"), QStringLiteral("存储"), QStringLiteral("低风险"),
-         {{QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\StorageSense\\Parameters\\StoragePolicy"), QStringLiteral("/v"), QStringLiteral("01"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("1"), QStringLiteral("/f")}, QStringLiteral("开启存储感知")}}},
-        {QStringLiteral("disable_search_highlights"), QStringLiteral("关闭搜索高亮"), QStringLiteral("关闭 Windows 搜索框推荐和热点内容。"), QStringLiteral("隐私"), QStringLiteral("低风险"),
-         {{QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\SearchSettings"), QStringLiteral("/v"), QStringLiteral("IsDynamicSearchBoxEnabled"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("0"), QStringLiteral("/f")}, QStringLiteral("关闭搜索高亮")}}},
-        {QStringLiteral("best_visual_performance"), QStringLiteral("调整为最佳性能视觉效果"), QStringLiteral("降低窗口动画、阴影和视觉效果开销。"), QStringLiteral("视觉"), QStringLiteral("中风险"),
-         {{QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VisualEffects"), QStringLiteral("/v"), QStringLiteral("VisualFXSetting"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("2"), QStringLiteral("/f")}, QStringLiteral("最佳性能视觉效果")}}},
-        {QStringLiteral("nvidia_tune"), QStringLiteral("NVIDIA 一键调优"), QStringLiteral("打开 NVIDIA 控制面板并写入常用低延迟电源策略。"), QStringLiteral("显卡"), QStringLiteral("中风险"),
-         {{QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start nvcplui.exe")}, QStringLiteral("打开 NVIDIA 控制面板")}}},
-        {QStringLiteral("amd_tune"), QStringLiteral("AMD 一键调优"), QStringLiteral("打开 AMD Software 并准备图形性能设置。"), QStringLiteral("显卡"), QStringLiteral("中风险"),
-         {{QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start amd-software:")}, QStringLiteral("打开 AMD Software")}}},
-        {QStringLiteral("windows_update_disable"), QStringLiteral("Windows 自动更新：一键禁用"), QStringLiteral("停止 Windows Update 服务并改为禁用。"), QStringLiteral("服务"), QStringLiteral("高风险"),
-         {{QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("sc stop wuauserv & sc config wuauserv start= disabled")}, QStringLiteral("禁用 Windows Update")}}, {}, true},
-        {QStringLiteral("windows_update_enable"), QStringLiteral("Windows 自动更新：一键开启"), QStringLiteral("恢复 Windows Update 服务按需启动。"), QStringLiteral("服务"), QStringLiteral("中风险"),
-         {{QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("sc config wuauserv start= demand & sc start wuauserv")}, QStringLiteral("开启 Windows Update")}}, {}, true},
-        {QStringLiteral("defender_restore"), QStringLiteral("Windows 安全中心：一键恢复"), QStringLiteral("恢复 Defender 相关策略和服务。"), QStringLiteral("安全"), QStringLiteral("中风险"),
-         {{QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("sc config WinDefend start= auto & sc start WinDefend")}, QStringLiteral("恢复 Windows Defender")}}, {}, true},
-        {QStringLiteral("edge_remove"), QStringLiteral("Edge 工具箱：一键彻底删除 Edge"), QStringLiteral("调用 PowerShell 移除 Edge 相关包和更新残留。"), QStringLiteral("浏览器"), QStringLiteral("高风险"),
-         {{QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), QStringLiteral("Get-AppxPackage *MicrosoftEdge* | Remove-AppxPackage")}, QStringLiteral("移除 Edge Appx 包")}}, {}, true},
-        {QStringLiteral("browser_homepage_fix"), QStringLiteral("一键修复浏览器主页篡改"), QStringLiteral("清理常见浏览器主页劫持策略。"), QStringLiteral("浏览器"), QStringLiteral("中风险"),
-         {{QStringLiteral("reg"), {QStringLiteral("delete"), QStringLiteral("HKCU\\Software\\Policies\\Microsoft\\Edge"), QStringLiteral("/f")}, QStringLiteral("清理 Edge 用户策略")},
-          {QStringLiteral("reg"), {QStringLiteral("delete"), QStringLiteral("HKCU\\Software\\Policies\\Google\\Chrome"), QStringLiteral("/f")}, QStringLiteral("清理 Chrome 用户策略")}}},
-    };
-}
-
-QVector<OptimizerItem> SystemCatalog::nvidiaItems() {
-    return {
-        item(QStringLiteral("nvidia-open"), QStringLiteral("NVIDIA 一键调优"), QStringLiteral("打开 NVIDIA 控制面板"), QStringLiteral("nvcplui.exe"), QStringLiteral("进入 NVIDIA 控制面板手动确认全局设置。"), QStringLiteral("start nvcplui.exe"), QStringLiteral("打开"), true, false),
-        item(QStringLiteral("nvidia-power"), QStringLiteral("NVIDIA 一键调优"), QStringLiteral("NVIDIA 电源管理建议"), QStringLiteral("NVIDIA Profile"), QStringLiteral("提示用户在控制面板中选择最高性能优先。"), QStringLiteral("start nvcplui.exe"), QStringLiteral("处理"), true, false),
-    };
-}
-
-QVector<OptimizerItem> SystemCatalog::amdItems() {
-    return {
-        item(QStringLiteral("amd-open"), QStringLiteral("AMD 一键调优"), QStringLiteral("打开 AMD Software"), QStringLiteral("amd-software:"), QStringLiteral("进入 AMD Software 调整图形性能。"), QStringLiteral("start amd-software:"), QStringLiteral("打开"), true, false),
-        item(QStringLiteral("gpu-reset"), QStringLiteral("AMD 一键调优"), QStringLiteral("恢复显卡默认设置"), QStringLiteral("显卡设置"), QStringLiteral("打开显卡面板后手动恢复默认。"), QStringLiteral("start ms-settings:display-advancedgraphics"), QStringLiteral("打开"), false, false),
-    };
-}
-
-QVector<OptimizerItem> SystemCatalog::maintenanceItems() {
-    return {
-        item(QStringLiteral("ad_block"), QStringLiteral("维护工具"), QStringLiteral("广告清理"), QStringLiteral("hosts"), QStringLiteral("写入 hosts 屏蔽广告域名并刷新 DNS。"), QStringLiteral("notepad %SystemRoot%\\System32\\drivers\\etc\\hosts"), QStringLiteral("打开"), true, false),
-        item(QStringLiteral("invalid_shortcuts"), QStringLiteral("维护工具"), QStringLiteral("无效快捷方式"), QStringLiteral("桌面/开始菜单"), QStringLiteral("扫描并处理无效 .lnk 快捷方式。"), QStringLiteral("powershell -NoProfile -Command \"Get-ChildItem $env:USERPROFILE\\Desktop -Filter *.lnk\""), QStringLiteral("扫描"), true, true),
-        item(QStringLiteral("scheduled_cleanup"), QStringLiteral("维护工具"), QStringLiteral("定时任务"), QStringLiteral("Task Scheduler"), QStringLiteral("创建、运行或删除每日清理计划。"), QStringLiteral("schtasks /query /tn C_DiskGlow_Cleanup"), QStringLiteral("检查"), true, true),
-        item(QStringLiteral("bcu"), QStringLiteral("维护工具"), QStringLiteral("BCUninstaller"), QStringLiteral("Bulk Crap Uninstaller"), QStringLiteral("查找并启动 BCUninstaller 进行高级卸载。"), QStringLiteral("start BCUninstaller.exe"), QStringLiteral("启动"), false, false),
-    };
-}
-
-QVector<OptimizerItem> SystemCatalog::edgeToolkitItems() {
-    return {
-        item(QStringLiteral("edge_install"), QStringLiteral("Edge 工具箱"), QStringLiteral("Edge 工具箱：一键静默安装 Edge"), QStringLiteral("winget"), QStringLiteral("使用 winget 安装 Microsoft Edge。"), QStringLiteral("winget install Microsoft.Edge --silent"), QStringLiteral("安装"), false, false),
-        item(QStringLiteral("edge_remove"), QStringLiteral("Edge 工具箱"), QStringLiteral("Edge 工具箱：一键彻底删除 Edge"), QStringLiteral("PowerShell"), QStringLiteral("移除 Edge Appx 包，需谨慎。"), QStringLiteral("powershell -NoProfile -Command \"Get-AppxPackage *MicrosoftEdge* | Remove-AppxPackage\""), QStringLiteral("删除"), false, false),
-        item(QStringLiteral("browser_homepage_fix"), QStringLiteral("Edge 工具箱"), QStringLiteral("一键修复浏览器主页篡改"), QStringLiteral("Registry"), QStringLiteral("清理常见 Chrome/Edge 主页策略。"), QStringLiteral("reg delete \"HKCU\\Software\\Policies\\Microsoft\\Edge\" /f"), QStringLiteral("修复"), true, false),
-    };
-}
-
-QStringList SystemCatalog::adBlockDomains() {
-    return {
-        QStringLiteral("doubleclick.net"),
-        QStringLiteral("googlesyndication.com"),
-        QStringLiteral("googleadservices.com"),
-        QStringLiteral("adnxs.com"),
-        QStringLiteral("adsystem.com"),
-        QStringLiteral("tracking-protection.cdn"),
-    };
-}
-
-QString SystemCatalog::runCommand(const QString& command, int* exitCode) {
+QString SystemCatalog::runCommand(const QString& commandText, int* exitCode) {
     QProcess process;
 #ifdef Q_OS_WIN
-    process.start(QStringLiteral("cmd.exe"), {QStringLiteral("/C"), command});
+    process.start(QStringLiteral("cmd.exe"), {QStringLiteral("/C"), commandText});
 #else
-    process.start(QStringLiteral("sh"), {QStringLiteral("-c"), command});
+    process.start(QStringLiteral("sh"), {QStringLiteral("-c"), commandText});
 #endif
-    process.waitForFinished(-1);
+    if (!process.waitForStarted(5000)) {
+        if (exitCode) {
+            *exitCode = -1;
+        }
+        return QStringLiteral("命令启动失败: %1").arg(process.errorString());
+    }
+    if (!process.waitForFinished(-1)) {
+        process.kill();
+        process.waitForFinished();
+    }
     if (exitCode) {
         *exitCode = process.exitCode();
     }
@@ -523,15 +347,34 @@ QString SystemCatalog::runCommand(const QString& command, int* exitCode) {
     return output.trimmed().isEmpty() ? QStringLiteral("命令无输出") : output.trimmed();
 }
 
-QString SystemCatalog::runActionCommands(const QVector<WindowsOptimizationCommand>& commands, int* exitCode) {
+QString SystemCatalog::runActionCommands(
+    const QVector<WindowsOptimizationCommand>& commands,
+    int* exitCode
+) {
     QString output;
-    int lastExit = 0;
-    for (const WindowsOptimizationCommand& command : commands) {
+    int overallExit = 0;
+    for (const WindowsOptimizationCommand& current : commands) {
+        if (current.executable.trimmed().isEmpty()) {
+            continue;
+        }
         QProcess process;
-        process.start(command.executable, command.arguments);
-        process.waitForFinished(-1);
-        lastExit = process.exitCode();
-        output += QStringLiteral("[%1]\n").arg(command.description);
+        process.start(current.executable, current.arguments);
+        if (!process.waitForStarted(5000)) {
+            if (overallExit == 0) {
+                overallExit = -1;
+            }
+            output += QStringLiteral("[%1]\n命令启动失败: %2\n")
+                .arg(current.description, process.errorString());
+            continue;
+        }
+        if (!process.waitForFinished(-1)) {
+            process.kill();
+            process.waitForFinished();
+        }
+        if (process.exitCode() != 0 && overallExit == 0) {
+            overallExit = process.exitCode();
+        }
+        output += QStringLiteral("[%1]\n").arg(current.description);
         output += QString::fromLocal8Bit(process.readAllStandardOutput());
         const QString error = QString::fromLocal8Bit(process.readAllStandardError());
         if (!error.isEmpty()) {
@@ -540,29 +383,7 @@ QString SystemCatalog::runActionCommands(const QVector<WindowsOptimizationComman
         output += QStringLiteral("\n");
     }
     if (exitCode) {
-        *exitCode = lastExit;
+        *exitCode = overallExit;
     }
     return output.trimmed().isEmpty() ? QStringLiteral("命令无输出") : output.trimmed();
-}
-
-QVector<OptimizerItem> SystemCatalog::fallbackStartupItems() {
-    return {
-        item(QStringLiteral("startup-services"), QStringLiteral("开机加速"), QStringLiteral("自动启动服务"),
-             QStringLiteral("services.msc"), QStringLiteral("查看自动启动服务，按需处理。"),
-             QStringLiteral("sc query type= service state= all"), QStringLiteral("检查"), true, true),
-        item(QStringLiteral("startup-scheduled"), QStringLiteral("开机加速"), QStringLiteral("计划任务启动项"),
-             QStringLiteral("Task Scheduler"), QStringLiteral("查看计划任务中的登录启动项。"),
-             QStringLiteral("schtasks /query /fo LIST"), QStringLiteral("检查"), true, true),
-    };
-}
-
-QVector<OptimizerItem> SystemCatalog::fallbackMemoryItems() {
-    return {
-        item(QStringLiteral("memory-explorer"), QStringLiteral("运行内存"), QStringLiteral("Windows Explorer"),
-             QStringLiteral("explorer.exe"), QStringLiteral("资源管理器占用异常时可重启。"),
-             QStringLiteral("taskkill /f /im explorer.exe & start explorer.exe"), QStringLiteral("重启"), false),
-        item(QStringLiteral("memory-browser"), QStringLiteral("运行内存"), QStringLiteral("浏览器后台进程"),
-             QStringLiteral("msedge/chrome"), QStringLiteral("检查浏览器后台占用。"),
-             QStringLiteral("tasklist | findstr /i \"msedge chrome\""), QStringLiteral("检查"), true, true),
-    };
 }

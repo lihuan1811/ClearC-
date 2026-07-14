@@ -191,26 +191,55 @@ QVector<GpuOptimizationAction> GpuOptimizationEngine::supportedActions(const QVe
         actions.push_back(action);
     };
 
-    add(QStringLiteral("nvidia_smi_status"), QStringLiteral("NVIDIA"), QStringLiteral("NVIDIA 状态刷新"),
-        QStringLiteral("使用 nvidia-smi 查看温度、负载、显存和驱动状态。"), QStringLiteral("只读"), nvidia && nvidiaSmi, false,
-        {{nvidiaSmiPath(), {QStringLiteral("--query-gpu=name,driver_version,memory.total,temperature.gpu,utilization.gpu"), QStringLiteral("--format=csv")}, QStringLiteral("nvidia-smi 状态查询")}});
-    add(QStringLiteral("nvidia_control_panel"), QStringLiteral("NVIDIA"), QStringLiteral("打开 NVIDIA 控制面板"),
-        QStringLiteral("打开厂商控制面板，具体 3D 设置由用户在官方面板内确认。"), QStringLiteral("只读"), windowsHost && nvidia && (nvidiaSmi || nvapi), false,
-        {{QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start nvcplui.exe")}, QStringLiteral("打开 NVIDIA 控制面板")}});
-    add(QStringLiteral("amd_software"), QStringLiteral("AMD"), QStringLiteral("打开 AMD Software"),
-        QStringLiteral("打开 AMD 官方控制面板；ADLX/AMDSoftware 可用时才显示。"), QStringLiteral("只读"), windowsHost && amd && (adlx || amdSoftware), false,
-        {{QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start amd-software:")}, QStringLiteral("打开 AMDSoftware")}});
-    add(QStringLiteral("intel_graphics_settings"), QStringLiteral("Intel"), QStringLiteral("打开 Windows 图形设置"),
-        QStringLiteral("Intel 显卡使用 Windows 图形设置和厂商驱动面板进行调整。"), QStringLiteral("只读"), windowsHost && intel, false,
-        {{QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start ms-settings:display-advancedgraphics")}, QStringLiteral("打开图形设置")}});
-    add(QStringLiteral("gpu_power_high_performance"), QStringLiteral("Windows"), QStringLiteral("切换高性能电源计划"),
-        QStringLiteral("仅使用 Windows powercfg 切换电源计划，不修改电压、频率或风扇。"), QStringLiteral("低风险"), windowsHost && hasAnyGpu(devices), true,
-        {{QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_MIN")}, QStringLiteral("启用高性能电源计划")}},
-        {{QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_BALANCED")}, QStringLiteral("恢复平衡电源计划")}});
-    add(QStringLiteral("gpu_hags_enable"), QStringLiteral("Windows"), QStringLiteral("启用硬件加速 GPU 调度"),
-        QStringLiteral("写入 GraphicsDrivers\\HwSchMode，需重启后生效。"), QStringLiteral("中风险"), windowsHost && hasAnyGpu(devices), true,
-        {{QStringLiteral("reg"), {QStringLiteral("add"), QStringLiteral("HKLM\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers"), QStringLiteral("/v"), QStringLiteral("HwSchMode"), QStringLiteral("/t"), QStringLiteral("REG_DWORD"), QStringLiteral("/d"), QStringLiteral("2"), QStringLiteral("/f")}, QStringLiteral("启用 HAGS")}},
-        {{QStringLiteral("reg"), {QStringLiteral("delete"), QStringLiteral("HKLM\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers"), QStringLiteral("/v"), QStringLiteral("HwSchMode"), QStringLiteral("/f")}, QStringLiteral("恢复 HAGS 默认")}});
+    add(
+        QStringLiteral("nvidia_one_click"),
+        QStringLiteral("NVIDIA"),
+        QStringLiteral("NVIDIA 一键调优"),
+        QStringLiteral("切换最高性能电源并清理 NVIDIA 着色器缓存；随后打开官方控制面板确认低延迟和垂直同步。仅在 nvidia-smi 或 NVAPI 可用时显示。"),
+        QStringLiteral("谨慎"),
+        windowsHost && nvidia && (nvidiaSmi || nvapi),
+        true,
+        {
+            {QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_MIN")}, QStringLiteral("启用最高性能电源")},
+            {QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), QStringLiteral("$p=@(\"$env:LOCALAPPDATA\\NVIDIA\\DXCache\",\"$env:LOCALAPPDATA\\NVIDIA\\GLCache\",\"$env:ProgramData\\NVIDIA Corporation\\NV_Cache\"); $p | ForEach-Object {Remove-Item $_ -Recurse -Force -ErrorAction SilentlyContinue}")}, QStringLiteral("清理 NVIDIA 着色器缓存")},
+            {QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start nvcplui.exe")}, QStringLiteral("打开 NVIDIA 官方控制面板")},
+        },
+        {
+            {QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_BALANCED")}, QStringLiteral("恢复平衡电源计划")},
+            {QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start nvcplui.exe")}, QStringLiteral("打开 NVIDIA 控制面板恢复默认设置")},
+        }
+    );
+    add(
+        QStringLiteral("amd_one_click"),
+        QStringLiteral("AMD"),
+        QStringLiteral("AMD 一键调优"),
+        QStringLiteral("切换全局性能电源并清理 AMD 驱动缓存；随后打开 AMD Software 确认垂直同步和帧率限制。仅在 ADLX 或 AMD Software 可用时显示。"),
+        QStringLiteral("谨慎"),
+        windowsHost && amd && (adlx || amdSoftware),
+        true,
+        {
+            {QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_MIN")}, QStringLiteral("启用全局性能电源")},
+            {QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), QStringLiteral("Remove-Item \"$env:LOCALAPPDATA\\AMD\\DxCache\",\"$env:LOCALAPPDATA\\AMD\\GLCache\" -Recurse -Force -ErrorAction SilentlyContinue")}, QStringLiteral("清理 AMD 驱动缓存")},
+            {QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start amd-software:")}, QStringLiteral("打开 AMD 官方控制面板")},
+        },
+        {
+            {QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_BALANCED")}, QStringLiteral("恢复平衡电源计划")},
+            {QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start amd-software:")}, QStringLiteral("打开 AMD Software 恢复默认设置")},
+        }
+    );
+    add(
+        QStringLiteral("gpu_restore_defaults"),
+        QStringLiteral("显卡"),
+        QStringLiteral("恢复显卡默认设置"),
+        QStringLiteral("恢复 Windows 平衡电源，并打开已检测到的厂商官方控制面板完成默认设置恢复。"),
+        QStringLiteral("安全"),
+        windowsHost && (nvidia || amd),
+        true,
+        {
+            {QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_BALANCED")}, QStringLiteral("恢复平衡电源计划")},
+            {QStringLiteral("cmd"), {QStringLiteral("/C"), nvidia ? QStringLiteral("start nvcplui.exe") : QStringLiteral("start amd-software:")}, QStringLiteral("打开厂商控制面板")},
+        }
+    );
 
     return actions;
 }

@@ -47,10 +47,6 @@ struct FolderUsageScan {
     QVector<ExtensionUsageEntry> extensions;
 };
 
-struct EmptyFolderEntry {
-    QString path;
-};
-
 struct MigrationFolder {
     QString key;
     QString name;
@@ -78,8 +74,6 @@ public:
     ) const;
     QVector<FolderUsageEntry> scanFolderUsage(const QString& rootPath, int limit = 50) const;
     FolderUsageScan scanFolderUsageDetailed(const QString& rootPath, int folderLimit = 80, int fileLimit = 60000) const;
-    QVector<EmptyFolderEntry> scanEmptyFolders(const QString& rootPath, int limit = 1000) const;
-
     FileOperationResult copyFiles(const QStringList& paths, const QString& targetDirectory) const;
     FileOperationResult moveFiles(const QStringList& paths, const QString& targetDirectory) const;
     FileOperationResult renameFile(const QString& path, const QString& newName) const;
@@ -112,6 +106,8 @@ private:
     bool removeEmptyDirectory(const QString& path, FileOperationResult* result) const;
     bool rollbackMigration(const QString& targetDirectory, const QString& sourceDirectory) const;
     bool ensureSupportsJunction(const QString& targetRoot, const QString& folderName, FileOperationResult* result) const;
+    bool updateMigrationRedirect(const MigrationFolder& folder, const QString& path, FileOperationResult* result) const;
+    static QString personalFolderRegistryValue(const QString& folderKey);
     QString junctionTarget(const QString& path) const;
     bool removeJunction(const QString& path, FileOperationResult* result) const;
 };

@@ -1,20 +1,18 @@
 #pragma once
 
-#include "AccountStore.h"
 #include "CleanupEngine.h"
 #include "FileManagementEngine.h"
 #include "GpuOptimizationEngine.h"
+#include "SoftwareUninstallEngine.h"
 #include "SystemCatalog.h"
 
 #include <QCheckBox>
 #include <QFutureWatcher>
 #include <QGraphicsScene>
 #include <QGraphicsView>
-#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMainWindow>
-#include <QMap>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QStackedWidget>
@@ -23,178 +21,153 @@
 #include <QTextEdit>
 #include <QTreeWidget>
 
+class QComboBox;
+
 class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
 
 private:
-    enum class CleanModule {
-        CDrive = 0,
-        QQ = 1,
-        WeChat = 2,
-    };
-
-    QWidget* createSidebar();
+    QWidget* createTopNavigation();
+    QWidget* createBottomBar();
     QWidget* createCleanPage();
-    QWidget* createOptimizePage();
-    QWidget* createGpuPage();
-    QWidget* createBxPage();
     QWidget* createUninstallPage();
+    QWidget* createOptimizePage();
     QWidget* createFilePage();
     QWidget* createRepairPage();
-    QWidget* createAccountPage();
+    QWidget* createGpuPanel();
     QWidget* scrollablePage(QWidget* page);
 
     void applyStyle();
     void selectPage(int index);
-    void selectCleanModule(CleanModule module);
-    QPushButton* sidebarButton(const QString& text, int index);
-    QPushButton* cleanSidebarButton(const QString& text, CleanModule module);
+    QPushButton* navigationButton(const QString& text, int index);
     QPushButton* primaryButton(const QString& text) const;
     QPushButton* secondaryButton(const QString& text) const;
-    void refreshDiskInfo();
     QWidget* pageHeader(const QString& title, const QString& subtitle) const;
     void showOperationLog(const QString& message);
+    void showOperationLogDialog();
+    void runGlobalRestore();
+    bool isWhitelisted(const QString& path) const;
+    void addToWhitelist(const QString& path);
+    void installTableContextMenu(QTableWidget* table, int pathColumn, int commandColumn = -1);
+    void installTreeContextMenu(QTreeWidget* tree, int pathColumn, int commandColumn = -1);
+    void setTableRowMetadata(QTableWidget* table, int row, const QString& description, const QString& risk, const QString& path = {}, const QString& command = {});
 
+    void refreshDiskInfo();
     void startScan();
     void finishScan();
     void populateCleanupTree();
-    void updateCleanModuleHeader();
-    void updateReclaimSpaceForCurrentCleanModule();
-    CleanupEngine::ScanScope currentScanScope() const;
-    QVector<CleanupEntry> entriesForCurrentCleanModule(CleanupEngine::CleanMode mode) const;
-    bool cleanupEntryMatchesCurrentModule(const CleanupEntry& entry) const;
-    void updateModeSelection(QCheckBox* changed);
+    void updateCleanMode(bool deep);
     CleanupEngine::CleanMode currentCleanMode() const;
     QVector<CleanupEntry> selectedCleanupEntries() const;
-    bool allowScanOnly() const;
     void cleanSelected();
-    void cleanAllForCurrentMode();
     void openBackupManager();
 
-    void populateStartupItems();
-    void populateMemoryItems();
-    void populateSystemOptimizationItems();
-    void populatePrivacyItems();
-    void populateRegistryItems();
-    void populateNvidiaItems();
-    void populateAmdItems();
-    void populateMaintenanceItems();
-    void populateEdgeToolkitItems();
-    void populateOptimizerTable(QTreeWidget* table, const QVector<OptimizerItem>& items);
-    void runOptimizerAction(const OptimizerItem& item);
-    void applyCurrentOptimizationTab();
-    void populateWindowsOptimizationActions();
-    void runWindowsOptimizationAction(int row, bool revert);
-    void runAdBlockAction(bool enable);
-    void runGlobalRestore();
-
-    void refreshGpuInfo();
-    void populateGpuActions();
-    void runGpuAction(int row, bool revert);
-
-    void populateBxItems();
-    void applyBxMode(const QString& mode);
-    void applyBxOptimization();
-
     void refreshInstalledApps();
-    void populateUninstallTable(QTableWidget* table, const QVector<QJsonObject>& apps, const QString& actionLabel);
-    void runUninstallCommand(const QString& command);
+    void populateUninstallTable();
+    void filterInstalledApps(const QString& text);
+    void uninstallApplication(int appIndex, bool strong);
+    void uninstallSelectedApplications();
+    void cleanApplicationResiduals(const InstalledApplication& app);
 
-    void chooseFileRoot();
+    QTableWidget* createOptimizationTable(QWidget* parent);
+    void populateOptimizationTable(QTableWidget* table, const QVector<WindowsOptimizationAction>& actions);
+    void runOptimizationAction(const WindowsOptimizationAction& action, bool revert);
+    void applyOptimizationPreset(QTableWidget* table, const QVector<WindowsOptimizationAction>& actions, const QString& title, bool deep);
+    void refreshGpuInfo();
+    void finishGpuRefresh();
+    void populateGpuActions();
+    void runGpuAction(int actionIndex, bool revert);
+
+    void refreshDisks();
+    void selectDiskRoot(const QString& rootPath);
     void scanFolderUsage();
-    void scanLargeFilesAsync();
-    void scanDuplicateFilesAsync();
-    void scanEmptyFolders();
-    void refreshMigrationFolders();
-    void migrateSelectedFolders();
-    void restoreSelectedFolders();
-    void populateLargeFiles(const QVector<FileEntry>& files);
-    void populateDuplicateFiles(const QVector<QVector<FileEntry>>& groups);
+    void scanManagedFiles();
+    void populateManagedFiles(const QVector<ManagedFileEntry>& files);
+    QStringList selectedManagedPaths() const;
+    void copySelectedFiles();
+    void moveSelectedFiles();
+    void renameSelectedFile();
+    void deleteSelectedFiles();
+    void shredSelectedFiles();
+    void repairSelectedFolderPermission();
+    void migrateSelectedFiles();
     void populateFolderUsage(const FolderUsageScan& scan);
     void populateExtensionUsageTable(const QVector<ExtensionUsageEntry>& entries, qint64 totalBytes);
     void populateFolderUsageTreemap(const QVector<FileUsageEntry>& entries, qint64 totalBytes, int totalFileCount);
-    void populateEmptyFolders(const QVector<EmptyFolderEntry>& folders);
+    void refreshMigrationFolders();
+    void finishMigrationRefresh();
     void populateMigrationFolders(const QVector<MigrationFolder>& folders);
-    void deleteSelectedFileItems();
-    void shredSelectedFileItems();
-    void scanFragments();
-    void optimizeFragments();
+    void migrateSelectedFolders();
+    void restoreSelectedFolders();
+    void restoreAllFolders();
 
-    void populateRepairTable();
+    void populateRepairTable(bool deep);
+    void updateRepairMode(bool deep);
     void runRepairCommand(const RepairItem& item);
     void runSelectedRepairs();
-
-    void refreshAccountState();
-    void registerAccount();
-    void loginAccount();
-    void redeemCard();
-    void logoutAccount();
 
     CleanupEngine cleanupEngine_;
     FileManagementEngine fileEngine_;
     GpuOptimizationEngine gpuEngine_;
-    AccountStore accountStore_;
-    QString backupRoot_;
-    CleanModule cleanModule_ = CleanModule::CDrive;
+    SoftwareUninstallEngine uninstallEngine_;
+
     QStackedWidget* pages_ = nullptr;
     QVector<QPushButton*> navButtons_;
+    QLabel* globalStatusLabel_ = nullptr;
+    QLabel* privilegeStatusLabel_ = nullptr;
 
     QLabel* totalSpaceLabel_ = nullptr;
     QLabel* usedSpaceLabel_ = nullptr;
     QLabel* freeSpaceLabel_ = nullptr;
     QLabel* reclaimSpaceLabel_ = nullptr;
-    QLabel* cleanTitleLabel_ = nullptr;
-    QLabel* cleanSubtitleLabel_ = nullptr;
     QLabel* cleanStatusLabel_ = nullptr;
-    QLabel* currentScanPath = nullptr;
+    QLabel* currentScanPath_ = nullptr;
     QProgressBar* scanProgress_ = nullptr;
     QTreeWidget* cleanupTree_ = nullptr;
-    QCheckBox* recommendedMode = nullptr;
-    QCheckBox* professionalMode = nullptr;
-    QCheckBox* selectAllMode = nullptr;
-    QCheckBox* simulateMode_ = nullptr;
-    QCheckBox* backupMode_ = nullptr;
+    QCheckBox* recommendedMode_ = nullptr;
+    QCheckBox* deepMode_ = nullptr;
     QVector<CleanupEntry> cleanupEntries_;
+    QString backupRoot_;
     QFutureWatcher<CleanupScanResult>* scanWatcher_ = nullptr;
+    QFutureWatcher<CleanResult>* cleanWatcher_ = nullptr;
 
-    QTabWidget* optimizerTabs_ = nullptr;
-    QMap<QString, QTreeWidget*> optimizerTables_;
-    QTableWidget* windowsOptimizationTable_ = nullptr;
+    QLineEdit* uninstallSearchEdit_ = nullptr;
+    QTableWidget* uninstallTable_ = nullptr;
+    QVector<InstalledApplication> installedApps_;
+    QFutureWatcher<QVector<InstalledApplication>>* uninstallWatcher_ = nullptr;
+
+    QTabWidget* optimizationTabs_ = nullptr;
+    QTableWidget* officeOptimizationTable_ = nullptr;
+    QTableWidget* gamingOptimizationTable_ = nullptr;
+    QTableWidget* advancedControlTable_ = nullptr;
     QTableWidget* gpuInfoTable_ = nullptr;
     QTableWidget* gpuActionTable_ = nullptr;
     QTextEdit* gpuLog_ = nullptr;
+    int gpuTabIndex_ = -1;
     QVector<GpuDeviceInfo> gpuDevices_;
     QVector<GpuOptimizationAction> gpuActions_;
-    QTableWidget* bxTable_ = nullptr;
-    QLabel* bxStatusLabel_ = nullptr;
-    QString bxMode_ = QStringLiteral("basic");
+    QFutureWatcher<QVector<GpuDeviceInfo>>* gpuWatcher_ = nullptr;
 
-    QTabWidget* uninstallTabs_ = nullptr;
-    QTableWidget* uninstallTable_ = nullptr;
-    QTableWidget* storeUninstallTable_ = nullptr;
-    QTabWidget* fileTabs_ = nullptr;
+    QComboBox* diskCombo_ = nullptr;
+    QComboBox* fileTypeCombo_ = nullptr;
     QString fileRoot_;
-    QLabel* fileRootLabel_ = nullptr;
+    QLabel* fileDiskInfoLabel_ = nullptr;
+    QLabel* fileStatusLabel_ = nullptr;
+    QTabWidget* fileTabs_ = nullptr;
     QWidget* folderUsagePage_ = nullptr;
     QTreeWidget* folderUsageTree_ = nullptr;
     QTableWidget* folderExtensionTable_ = nullptr;
     QGraphicsScene* folderUsageMapScene_ = nullptr;
     QGraphicsView* folderUsageMapView_ = nullptr;
-    QTableWidget* largeFileTable_ = nullptr;
-    QTableWidget* duplicateFileTable_ = nullptr;
-    QTableWidget* emptyFolderTable_ = nullptr;
+    QTableWidget* managedFileTable_ = nullptr;
     QTableWidget* migrationTable_ = nullptr;
     QLineEdit* migrationTargetEdit_ = nullptr;
-    QCheckBox* migrationMoveFiles_ = nullptr;
-    QLabel* fileStatusLabel_ = nullptr;
-    QTextEdit* repairLog_ = nullptr;
-    QTableWidget* repairTable_ = nullptr;
-    QTextEdit* operationLog_ = nullptr;
+    QVector<ManagedFileEntry> managedFiles_;
+    QFutureWatcher<QVector<MigrationFolder>>* migrationWatcher_ = nullptr;
 
-    QLabel* accountStateLabel_ = nullptr;
-    QLineEdit* accountEmailEdit_ = nullptr;
-    QLineEdit* accountNameEdit_ = nullptr;
-    QLineEdit* accountPasswordEdit_ = nullptr;
-    QLineEdit* cardCodeEdit_ = nullptr;
+    QCheckBox* recommendedRepairMode_ = nullptr;
+    QCheckBox* deepRepairMode_ = nullptr;
+    QTableWidget* repairTable_ = nullptr;
+    QTextEdit* repairLog_ = nullptr;
 };

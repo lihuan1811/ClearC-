@@ -8,46 +8,41 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Concurrent)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Concurrent)
 
-qt_add_executable(CDriveCleanerQt
+set(CDRIVE_CLEANER_SOURCES
     src/main.cpp
     src/CleanupEngine.h
     src/CleanupEngine.cpp
-    src/DismRuleScanner.h
-    src/DismRuleScanner.cpp
     src/FileManagementEngine.h
     src/FileManagementEngine.cpp
     src/GpuOptimizationEngine.h
     src/GpuOptimizationEngine.cpp
+    src/SoftwareUninstallEngine.h
+    src/SoftwareUninstallEngine.cpp
     src/SystemCatalog.h
     src/SystemCatalog.cpp
-    src/AccountStore.h
-    src/AccountStore.cpp
     src/MainWindow.h
     src/MainWindow.cpp
 )
 
-target_link_libraries(CDriveCleanerQt
-    PRIVATE
-        Qt6::Widgets
-        Qt6::Concurrent
-)
-
-set(DISMPP_RULE_FILE "${CMAKE_SOURCE_DIR}/rules/dismpp/Data.xml")
-if(NOT EXISTS "${DISMPP_RULE_FILE}")
-    message(WARNING "Dism++ rules/dismpp/Data.xml was not found; professional cleanup rules will be limited.")
+if(QT_VERSION_MAJOR GREATER_EQUAL 6)
+    qt_add_executable(CDriveCleanerQt ${CDRIVE_CLEANER_SOURCES})
+else()
+    add_executable(CDriveCleanerQt ${CDRIVE_CLEANER_SOURCES})
 endif()
 
+target_link_libraries(CDriveCleanerQt
+    PRIVATE
+        Qt${QT_VERSION_MAJOR}::Widgets
+        Qt${QT_VERSION_MAJOR}::Concurrent
+)
+
 if(WIN32)
+    target_link_libraries(CDriveCleanerQt PRIVATE shell32 advapi32)
     set_target_properties(CDriveCleanerQt PROPERTIES
         WIN32_EXECUTABLE TRUE
         OUTPUT_NAME "C DiskGlow"
     )
 endif()
-
-add_custom_command(TARGET CDriveCleanerQt POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_SOURCE_DIR}/rules/dismpp"
-        "$<TARGET_FILE_DIR:CDriveCleanerQt>/rules/dismpp"
-)
