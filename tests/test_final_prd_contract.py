@@ -297,3 +297,5 @@ def test_windows_release_builds_qt5_x86_and_x64_packages():
         assert token in workflow
     assert "ctest --test-dir build" in workflow
     assert "CDriveCleanerEngineTests" in cmake
+    assert cmake.count("target_compile_options(") >= 2
+    assert cmake.count("/utf-8") >= 2

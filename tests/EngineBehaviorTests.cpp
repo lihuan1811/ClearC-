@@ -32,6 +32,16 @@ bool require(bool condition, const QString& message) {
     return condition;
 }
 
+bool chineseUiLiteralsUseUtf8() {
+    const QVector<uint> expected = {
+        0x43, 0x20, 0x76d8, 0x6e05, 0x7406, 0x5927, 0x5e08,
+    };
+    return require(
+        QStringLiteral("C 盘清理大师").toUcs4() == expected,
+        QStringLiteral("Chinese UI literals are compiled as UTF-8")
+    );
+}
+
 bool restoreDoesNotOverwriteCurrentFile() {
     QTemporaryDir directory;
     if (!require(directory.isValid(), QStringLiteral("temporary directory is available"))) {
@@ -187,7 +197,8 @@ bool criticalOptimizationActionsProvideInverseOperations() {
 
 int main(int argc, char* argv[]) {
     QCoreApplication application(argc, argv);
-    const bool ok = restoreDoesNotOverwriteCurrentFile()
+    const bool ok = chineseUiLiteralsUseUtf8()
+        && restoreDoesNotOverwriteCurrentFile()
         && pruningKeepsNewestBackups()
         && batchRenamePreservesExtensions()
         && folderScanRetainsOnlyLargestRequestedFiles()

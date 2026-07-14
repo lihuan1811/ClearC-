@@ -66,6 +66,10 @@ target_link_libraries(CDriveCleanerQt
         Qt${QT_VERSION_MAJOR}::Concurrent
 )
 
+if(MSVC)
+    target_compile_options(CDriveCleanerQt PRIVATE /utf-8)
+endif()
+
 if(WIN32)
     target_include_directories(CDriveCleanerQt PRIVATE ${nvapi_SOURCE_DIR} ${adlx_SOURCE_DIR})
     target_link_libraries(CDriveCleanerQt PRIVATE shell32 advapi32 PowrProf)
@@ -90,6 +94,9 @@ if(BUILD_TESTING)
         PRIVATE
             Qt${QT_VERSION_MAJOR}::Widgets
     )
+    if(MSVC)
+        target_compile_options(CDriveCleanerEngineTests PRIVATE /utf-8)
+    endif()
     if(WIN32)
         target_link_libraries(CDriveCleanerEngineTests PRIVATE shell32 advapi32 PowrProf)
     endif()
