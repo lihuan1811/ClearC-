@@ -70,11 +70,15 @@ jobs:
             Sort-Object FullName -Descending |
             Select-Object -First 1
           if (-not $crtDir) {
-            throw "MSVC x64 CRT redistributable directory was not found under $redistRoot."
+            throw "MSVC ${{ matrix.arch }} CRT redistributable directory was not found under $redistRoot."
           }
 
           Copy-Item -Path (Join-Path $crtDir.FullName "*.dll") -Destination package -Force
-          foreach ($dll in @("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
+          $requiredDlls = @("msvcp140.dll", "vcruntime140.dll")
+          if ("${{ matrix.arch }}" -eq "x64") {
+            $requiredDlls += "vcruntime140_1.dll"
+          }
+          foreach ($dll in $requiredDlls) {
             if (!(Test-Path (Join-Path "package" $dll))) {
               throw "Required MSVC runtime DLL is missing from package: $dll"
             }
