@@ -1,29 +1,33 @@
 #include "GpuOptimizationEngine.h"
+#include "AmdAdlxBridge.h"
+#include "NvidiaNvapiBridge.h"
 
 #include <QDir>
 #include <QFileInfo>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QJsonValue>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QSettings>
 #include <QStandardPaths>
-#include <QVariant>
-
-#ifdef Q_OS_WIN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
 
 namespace {
 
 QString runProcess(const QString& executable, const QStringList& arguments, int* exitCode = nullptr) {
     QProcess process;
     process.start(executable, arguments);
-    process.waitForFinished(15000);
+    if (!process.waitForStarted(5000)) {
+        if (exitCode) {
+            *exitCode = -1;
+        }
+        return QStringLiteral("命令启动失败: %1").arg(process.errorString());
+    }
+    if (!process.waitForFinished(15000)) {
+        process.kill();
+        process.waitForFinished();
+        if (exitCode) {
+            *exitCode = -1;
+        }
+        return QStringLiteral("命令执行超时: %1").arg(executable);
+    }
     if (exitCode) {
         *exitCode = process.exitCode();
     }
@@ -49,13 +53,13 @@ QString vendorFromName(const QString& name) {
     return QStringLiteral("Unknown");
 }
 
-qint64 adapterRamToMB(const QJsonValue& value) {
+qint64 adapterRamToMB(const QString& value) {
     bool ok = false;
-    const qint64 bytes = value.toVariant().toLongLong(&ok);
+    const qulonglong bytes = value.trimmed().toULongLong(&ok);
     if (!ok || bytes <= 0) {
         return -1;
     }
-    return bytes / (1024 * 1024);
+    return static_cast<qint64>(bytes / (1024 * 1024));
 }
 
 QString programFilesPath(const QString& envName, const QString& fallback) {
@@ -72,20 +76,58 @@ bool hasVendor(const QVector<GpuDeviceInfo>& devices, const QString& vendor) {
     return false;
 }
 
-bool hasAnyGpu(const QVector<GpuDeviceInfo>& devices) {
-    return !devices.isEmpty();
+QString powerBackupKey(const QString& actionId) {
+    return QStringLiteral("gpu/power_scheme_backup/%1").arg(actionId);
 }
 
+bool captureActivePowerScheme(const QString& actionId, QString* error) {
 #ifdef Q_OS_WIN
-bool loadWindowsLibrary(const wchar_t* name) {
-    HMODULE module = LoadLibraryW(name);
-    if (!module) {
+    QSettings settings;
+    const QString key = powerBackupKey(actionId);
+    if (settings.contains(key)) {
+        return true;
+    }
+    int exitCode = 0;
+    const QString output = runProcess(QStringLiteral("powercfg"), {QStringLiteral("/getactivescheme")}, &exitCode);
+    const QRegularExpression pattern(QStringLiteral("([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"));
+    const QRegularExpressionMatch match = pattern.match(output);
+    if (exitCode != 0 || !match.hasMatch()) {
+        if (error) {
+            *error = QStringLiteral("无法读取当前电源计划，已停止显卡优化: %1").arg(output);
+        }
         return false;
     }
-    FreeLibrary(module);
+    settings.setValue(key, match.captured(1));
     return true;
-}
+#else
+    Q_UNUSED(actionId);
+    if (error) *error = QStringLiteral("仅 Windows 支持电源计划");
+    return false;
 #endif
+}
+
+QString restoreActivePowerScheme(const QString& actionId, int* exitCode) {
+#ifdef Q_OS_WIN
+    QSettings settings;
+    const QString key = powerBackupKey(actionId);
+    const QString guid = settings.value(key).toString();
+    if (guid.isEmpty()) {
+        if (exitCode) *exitCode = 0;
+        return QStringLiteral("原电源计划已处于还原状态");
+    }
+    int code = 0;
+    const QString output = runProcess(QStringLiteral("powercfg"), {QStringLiteral("/setactive"), guid}, &code);
+    if (code == 0) {
+        settings.remove(key);
+    }
+    if (exitCode) *exitCode = code;
+    return output;
+#else
+    Q_UNUSED(actionId);
+    if (exitCode) *exitCode = -1;
+    return QStringLiteral("仅 Windows 支持电源计划");
+#endif
+}
 
 }  // namespace
 
@@ -150,7 +192,6 @@ QVector<GpuOptimizationAction> GpuOptimizationEngine::supportedActions(const QVe
 #endif
     const bool nvidia = hasVendor(devices, QStringLiteral("NVIDIA"));
     const bool amd = hasVendor(devices, QStringLiteral("AMD"));
-    const bool intel = hasVendor(devices, QStringLiteral("Intel"));
     bool nvidiaSmi = false;
     bool nvapi = false;
     bool adlx = false;
@@ -195,49 +236,56 @@ QVector<GpuOptimizationAction> GpuOptimizationEngine::supportedActions(const QVe
         QStringLiteral("nvidia_one_click"),
         QStringLiteral("NVIDIA"),
         QStringLiteral("NVIDIA 一键调优"),
-        QStringLiteral("切换最高性能电源并清理 NVIDIA 着色器缓存；随后打开官方控制面板确认低延迟和垂直同步。仅在 nvidia-smi 或 NVAPI 可用时显示。"),
+        QStringLiteral("通过官方 NVAPI 保存并设置全局最高性能和关闭垂直同步，同时切换高性能电源。低延迟模式不在官方 NVAPI SDK 的可修改范围内，需在 NVIDIA 控制面板手动设置。"),
         QStringLiteral("谨慎"),
-        windowsHost && nvidia && (nvidiaSmi || nvapi),
+        windowsHost && nvidia && nvapi,
         true,
         {
             {QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_MIN")}, QStringLiteral("启用最高性能电源")},
-            {QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), QStringLiteral("$p=@(\"$env:LOCALAPPDATA\\NVIDIA\\DXCache\",\"$env:LOCALAPPDATA\\NVIDIA\\GLCache\",\"$env:ProgramData\\NVIDIA Corporation\\NV_Cache\"); $p | ForEach-Object {Remove-Item $_ -Recurse -Force -ErrorAction SilentlyContinue}")}, QStringLiteral("清理 NVIDIA 着色器缓存")},
             {QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start nvcplui.exe")}, QStringLiteral("打开 NVIDIA 官方控制面板")},
         },
         {
-            {QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_BALANCED")}, QStringLiteral("恢复平衡电源计划")},
-            {QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start nvcplui.exe")}, QStringLiteral("打开 NVIDIA 控制面板恢复默认设置")},
+            {QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start nvcplui.exe")}, QStringLiteral("打开 NVIDIA 控制面板确认还原结果")},
         }
     );
     add(
         QStringLiteral("amd_one_click"),
         QStringLiteral("AMD"),
         QStringLiteral("AMD 一键调优"),
-        QStringLiteral("切换全局性能电源并清理 AMD 驱动缓存；随后打开 AMD Software 确认垂直同步和帧率限制。仅在 ADLX 或 AMD Software 可用时显示。"),
+        QStringLiteral("通过 AMD 官方 ADLX 保存并关闭垂直同步和帧率目标限制，同时切换高性能电源；只在当前驱动实际支持这些接口时显示。"),
         QStringLiteral("谨慎"),
-        windowsHost && amd && (adlx || amdSoftware),
+        windowsHost && amd && adlx,
         true,
         {
             {QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_MIN")}, QStringLiteral("启用全局性能电源")},
-            {QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), QStringLiteral("Remove-Item \"$env:LOCALAPPDATA\\AMD\\DxCache\",\"$env:LOCALAPPDATA\\AMD\\GLCache\" -Recurse -Force -ErrorAction SilentlyContinue")}, QStringLiteral("清理 AMD 驱动缓存")},
             {QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start amd-software:")}, QStringLiteral("打开 AMD 官方控制面板")},
         },
         {
-            {QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_BALANCED")}, QStringLiteral("恢复平衡电源计划")},
-            {QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start amd-software:")}, QStringLiteral("打开 AMD Software 恢复默认设置")},
+            {QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start amd-software:")}, QStringLiteral("打开 AMD Software 确认还原结果")},
         }
     );
     add(
-        QStringLiteral("gpu_restore_defaults"),
-        QStringLiteral("显卡"),
-        QStringLiteral("恢复显卡默认设置"),
-        QStringLiteral("恢复 Windows 平衡电源，并打开已检测到的厂商官方控制面板完成默认设置恢复。"),
-        QStringLiteral("安全"),
-        windowsHost && (nvidia || amd),
-        true,
+        QStringLiteral("nvidia_official_panel"),
+        QStringLiteral("NVIDIA"),
+        QStringLiteral("打开 NVIDIA 官方控制面板"),
+        QStringLiteral("当前驱动未提供所需 NVAPI 修改接口时，仅提供官方控制面板入口，不承诺自动调优。"),
+        QStringLiteral("只读"),
+        windowsHost && nvidia && !nvapi && nvidiaSmi,
+        false,
         {
-            {QStringLiteral("powercfg"), {QStringLiteral("/setactive"), QStringLiteral("SCHEME_BALANCED")}, QStringLiteral("恢复平衡电源计划")},
-            {QStringLiteral("cmd"), {QStringLiteral("/C"), nvidia ? QStringLiteral("start nvcplui.exe") : QStringLiteral("start amd-software:")}, QStringLiteral("打开厂商控制面板")},
+            {QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start nvcplui.exe")}, QStringLiteral("打开 NVIDIA 官方控制面板")},
+        }
+    );
+    add(
+        QStringLiteral("amd_official_panel"),
+        QStringLiteral("AMD"),
+        QStringLiteral("打开 AMD Software"),
+        QStringLiteral("当前驱动未提供可修改的 ADLX 3D 接口时，仅提供 AMD 官方入口。"),
+        QStringLiteral("只读"),
+        windowsHost && amd && !adlx && amdSoftware,
+        false,
+        {
+            {QStringLiteral("cmd"), {QStringLiteral("/C"), QStringLiteral("start amd-software:")}, QStringLiteral("打开 AMD Software")},
         }
     );
 
@@ -245,44 +293,77 @@ QVector<GpuOptimizationAction> GpuOptimizationEngine::supportedActions(const QVe
 }
 
 QString GpuOptimizationEngine::runAction(const GpuOptimizationAction& action, int* exitCode) const {
-    return SystemCatalog::runActionCommands(action.commands, exitCode);
+    QStringList output;
+    if (action.id == QStringLiteral("nvidia_one_click") || action.id == QStringLiteral("amd_one_click")) {
+        QString captureError;
+        if (!captureActivePowerScheme(action.id, &captureError)) {
+            if (exitCode) *exitCode = -1;
+            return captureError;
+        }
+        int bridgeExit = 0;
+        output.push_back(action.id == QStringLiteral("nvidia_one_click")
+            ? NvidiaNvapiBridge::applyGlobalPerformanceSettings(&bridgeExit)
+            : AmdAdlxBridge::applyGlobalPerformanceSettings(&bridgeExit));
+        if (bridgeExit != 0) {
+            if (exitCode) *exitCode = bridgeExit;
+            return output.join(QStringLiteral("\n"));
+        }
+    }
+    int commandExit = 0;
+    output.push_back(SystemCatalog::runActionCommands(action.commands, &commandExit));
+    if (exitCode) *exitCode = commandExit;
+    return output.join(QStringLiteral("\n"));
 }
 
 QString GpuOptimizationEngine::restoreAction(const GpuOptimizationAction& action, int* exitCode) const {
-    return SystemCatalog::runActionCommands(action.revertCommands, exitCode);
+    QStringList output;
+    int overallExit = 0;
+    if (action.id == QStringLiteral("nvidia_one_click") || action.id == QStringLiteral("amd_one_click")) {
+        int bridgeExit = 0;
+        output.push_back(action.id == QStringLiteral("nvidia_one_click")
+            ? NvidiaNvapiBridge::restoreGlobalPerformanceSettings(&bridgeExit)
+            : AmdAdlxBridge::restoreGlobalPerformanceSettings(&bridgeExit));
+        if (bridgeExit != 0) {
+            overallExit = bridgeExit;
+        }
+        int powerExit = 0;
+        output.push_back(restoreActivePowerScheme(action.id, &powerExit));
+        if (overallExit == 0 && powerExit != 0) {
+            overallExit = powerExit;
+        }
+    }
+    int commandExit = 0;
+    output.push_back(SystemCatalog::runActionCommands(action.revertCommands, &commandExit));
+    if (overallExit == 0 && commandExit != 0) {
+        overallExit = commandExit;
+    }
+    if (exitCode) *exitCode = overallExit;
+    return output.join(QStringLiteral("\n"));
 }
 
 QVector<GpuDeviceInfo> GpuOptimizationEngine::queryVideoControllers() const {
     QVector<GpuDeviceInfo> devices;
 #ifdef Q_OS_WIN
-    const QString script = QStringLiteral("Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,AdapterRAM | ConvertTo-Json -Compress");
+    const QString script = QStringLiteral("Get-WmiObject Win32_VideoController | ForEach-Object { '{0}`t{1}`t{2}' -f ($_.Name -replace '`t',' '),$_.DriverVersion,$_.AdapterRAM }");
     int exitCode = 0;
     const QString output = runProcess(QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), script}, &exitCode);
     if (exitCode != 0 || output.isEmpty()) {
         return devices;
     }
-    QJsonParseError error;
-    QJsonDocument doc = QJsonDocument::fromJson(output.toUtf8(), &error);
-    if (error.error != QJsonParseError::NoError) {
-        return devices;
-    }
-    QJsonArray array;
-    if (doc.isArray()) {
-        array = doc.array();
-    } else if (doc.isObject()) {
-        array.push_back(doc.object());
-    }
-    for (const QJsonValue& value : array) {
-        const QJsonObject object = value.toObject();
-        const QString name = object.value(QStringLiteral("Name")).toString();
+    for (const QString& line : output.split(QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts)) {
+        const QStringList fields = line.split(QLatin1Char('\t'));
+        if (fields.size() < 3) {
+            continue;
+        }
+        const QString name = fields.at(0).trimmed();
         if (name.isEmpty()) {
             continue;
         }
         GpuDeviceInfo device;
         device.name = name;
         device.vendor = vendorFromName(name);
-        device.driverVersion = object.value(QStringLiteral("DriverVersion")).toString();
-        device.memoryMB = adapterRamToMB(object.value(QStringLiteral("AdapterRAM")));
+        device.driverVersion = fields.at(1).trimmed();
+        device.memoryMB = adapterRamToMB(fields.at(2));
         devices.push_back(device);
     }
 #endif
@@ -338,19 +419,11 @@ QString GpuOptimizationEngine::nvidiaSmiPath() const {
 }
 
 bool GpuOptimizationEngine::nvapiAvailable() const {
-#ifdef Q_OS_WIN
-    return loadWindowsLibrary(L"nvapi64.dll") || loadWindowsLibrary(L"nvapi.dll");
-#else
-    return false;
-#endif
+    return NvidiaNvapiBridge::supportsGlobalProfileSettings();
 }
 
 bool GpuOptimizationEngine::adlxAvailable() const {
-#ifdef Q_OS_WIN
-    return loadWindowsLibrary(L"amdadlx64.dll") || loadWindowsLibrary(L"atiadlxx.dll");
-#else
-    return false;
-#endif
+    return AmdAdlxBridge::supportsGlobal3DSettings();
 }
 
 bool GpuOptimizationEngine::amdSoftwareAvailable() const {

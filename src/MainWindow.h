@@ -20,6 +20,7 @@
 #include <QTabWidget>
 #include <QTextEdit>
 #include <QTreeWidget>
+#include <functional>
 
 class QComboBox;
 
@@ -51,7 +52,9 @@ private:
     void addToWhitelist(const QString& path);
     void installTableContextMenu(QTableWidget* table, int pathColumn, int commandColumn = -1);
     void installTreeContextMenu(QTreeWidget* tree, int pathColumn, int commandColumn = -1);
-    void setTableRowMetadata(QTableWidget* table, int row, const QString& description, const QString& risk, const QString& path = {}, const QString& command = {});
+    void setTableRowMetadata(QTableWidget* table, int row, const QString& description, const QString& risk, const QString& path = {}, const QString& command = {}, const QString& actionId = {});
+    void runContextAction(const QString& actionId);
+    void runShellCommandAsync(const QString& title, const QString& command);
 
     void refreshDiskInfo();
     void startScan();
@@ -60,6 +63,7 @@ private:
     void updateCleanMode(bool deep);
     CleanupEngine::CleanMode currentCleanMode() const;
     QVector<CleanupEntry> selectedCleanupEntries() const;
+    void cleanEntries(const QVector<CleanupEntry>& entries);
     void cleanSelected();
     void openBackupManager();
 
@@ -84,6 +88,11 @@ private:
     void scanFolderUsage();
     void scanManagedFiles();
     void populateManagedFiles(const QVector<ManagedFileEntry>& files);
+    void runFileOperationAsync(
+        const QString& title,
+        const std::function<FileOperationResult()>& operation,
+        const std::function<void()>& completed = {}
+    );
     QStringList selectedManagedPaths() const;
     void copySelectedFiles();
     void moveSelectedFiles();
@@ -129,6 +138,7 @@ private:
     QCheckBox* deepMode_ = nullptr;
     QVector<CleanupEntry> cleanupEntries_;
     QString backupRoot_;
+    qint64 cleanFreeBytesBefore_ = -1;
     QFutureWatcher<CleanupScanResult>* scanWatcher_ = nullptr;
     QFutureWatcher<CleanResult>* cleanWatcher_ = nullptr;
 
@@ -164,7 +174,10 @@ private:
     QTableWidget* migrationTable_ = nullptr;
     QLineEdit* migrationTargetEdit_ = nullptr;
     QVector<ManagedFileEntry> managedFiles_;
+    QFutureWatcher<FolderUsageScan>* folderUsageWatcher_ = nullptr;
+    QFutureWatcher<QVector<ManagedFileEntry>>* managedFileWatcher_ = nullptr;
     QFutureWatcher<QVector<MigrationFolder>>* migrationWatcher_ = nullptr;
+    bool fileOperationRunning_ = false;
 
     QCheckBox* recommendedRepairMode_ = nullptr;
     QCheckBox* deepRepairMode_ = nullptr;

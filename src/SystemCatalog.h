@@ -44,4 +44,9 @@ public:
         const QVector<WindowsOptimizationCommand>& commands,
         int* exitCode = nullptr
     );
+    static QString runOptimizationAction(
+        const WindowsOptimizationAction& action,
+        bool revert,
+        int* exitCode = nullptr
+    );
 };

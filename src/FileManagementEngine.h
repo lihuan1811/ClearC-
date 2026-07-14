@@ -77,8 +77,10 @@ public:
     FileOperationResult copyFiles(const QStringList& paths, const QString& targetDirectory) const;
     FileOperationResult moveFiles(const QStringList& paths, const QString& targetDirectory) const;
     FileOperationResult renameFile(const QString& path, const QString& newName) const;
+    FileOperationResult renameFiles(const QStringList& paths, const QString& prefix) const;
     FileOperationResult deleteFiles(const QStringList& paths) const;
     FileOperationResult shredFiles(const QStringList& paths) const;
+    FileOperationResult migrateFilesWithShortcuts(const QStringList& paths, const QString& targetDirectory) const;
     FileOperationResult createShortcut(const QString& target, const QString& shortcutPath) const;
     FileOperationResult repairFolderPermission(const QString& path) const;
 

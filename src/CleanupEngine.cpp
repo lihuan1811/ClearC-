@@ -6,12 +6,19 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
-#include <QProcess>
 #include <QRegularExpression>
 #include <QStandardPaths>
 #include <QTextStream>
 
 #include <algorithm>
+
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shellapi.h>
+#endif
 
 namespace {
 
@@ -114,25 +121,35 @@ CleanupScanResult CleanupEngine::scanSystem(const ProgressCallback& progress) {
             if (files.isEmpty() && totalSize <= 0) {
                 continue;
             }
-            CleanupEntry entry;
-            entry.ruleId = rule.id;
-            entry.category = rule.category;
-            entry.title = rule.title;
-            entry.riskLabel = rule.riskLabel;
-            entry.path = rootPath;
-            entry.files = files;
-            entry.size = totalSize;
-            entry.scanOnly = rule.scanOnly;
-            entry.recommended = rule.recommended;
-            entry.professional = rule.professional;
-            entry.privacySensitive = rule.privacySensitive;
-            result.entries.push_back(entry);
-            result.totalBytes += totalSize;
-            if (!rule.scanOnly && rule.recommended) {
-                result.recommendedBytes += totalSize;
-            }
-            if (rule.professional) {
-                result.professionalBytes += totalSize;
+            const auto appendEntry = [&result, &rule](const QString& path, const QStringList& entryFiles, qint64 size, const QString& title) {
+                CleanupEntry entry;
+                entry.ruleId = rule.id;
+                entry.category = rule.category;
+                entry.title = title;
+                entry.riskLabel = rule.riskLabel;
+                entry.path = path;
+                entry.files = entryFiles;
+                entry.size = size;
+                entry.scanOnly = rule.scanOnly;
+                entry.recommended = rule.recommended;
+                entry.professional = rule.professional;
+                entry.privacySensitive = rule.privacySensitive;
+                result.entries.push_back(entry);
+                result.totalBytes += size;
+                if (!rule.scanOnly && rule.recommended) {
+                    result.recommendedBytes += size;
+                }
+                if (rule.professional) {
+                    result.professionalBytes += size;
+                }
+            };
+            if (rule.aggregate) {
+                appendEntry(rootPath, files, totalSize, rule.title);
+            } else {
+                for (const QString& file : files) {
+                    const QFileInfo info(file);
+                    appendEntry(file, {file}, info.size(), info.fileName().isEmpty() ? rule.title : info.fileName());
+                }
             }
         }
     }
@@ -173,6 +190,9 @@ CleanResult CleanupEngine::cleanEntriesDetailed(
     CleanResult result;
     int count = 0;
     const QString root = options.backupRoot.isEmpty() ? defaultBackupRoot() : options.backupRoot;
+    if (options.backup) {
+        pruneBackups(root, 5000, 1024LL * 1024LL * 1024LL);
+    }
 
     for (const CleanupEntry& entry : entries) {
         if (entry.scanOnly && !options.allowScanOnly) {
@@ -247,7 +267,8 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
         const QStringList& patterns = {},
         const QStringList& pathContains = {},
         bool recommended = true,
-        bool scanOnly = false
+        bool scanOnly = false,
+        bool aggregate = false
     ) {
         CleanupRule rule;
         rule.id = id;
@@ -258,6 +279,7 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
         rule.patterns = patterns;
         rule.pathContains = pathContains;
         rule.scanOnly = scanOnly;
+        rule.aggregate = aggregate;
         rule.recommended = recommended;
         rule.professional = true;
         rule.privacySensitive = false;
@@ -309,7 +331,7 @@ QVector<CleanupRule> CleanupEngine::cleanupRules() {
         QStringLiteral("回收站文件"),
         QStringLiteral("谨慎"),
         {winJoin({systemDrive, QStringLiteral("$Recycle.Bin")})},
-        {}, {}, false
+        {}, {}, false, false, true
     );
     add(
         QStringLiteral("edge_cache"),
@@ -412,9 +434,17 @@ bool CleanupEngine::restoreBackupItem(const BackupRecord& record, QString* error
         }
         return false;
     }
-    QDir().mkpath(QFileInfo(record.sourcePath).absolutePath());
-    if (QFile::exists(record.sourcePath)) {
-        QFile::remove(record.sourcePath);
+    if (QFileInfo::exists(record.sourcePath)) {
+        if (error) {
+            *error = QStringLiteral("原路径已存在当前文件，为避免覆盖已跳过: %1").arg(record.sourcePath);
+        }
+        return false;
+    }
+    if (!QDir().mkpath(QFileInfo(record.sourcePath).absolutePath())) {
+        if (error) {
+            *error = QStringLiteral("创建恢复目录失败: %1").arg(QFileInfo(record.sourcePath).absolutePath());
+        }
+        return false;
     }
     if (!QFile::copy(record.backupPath, record.sourcePath)) {
         if (error) {
@@ -447,13 +477,14 @@ bool CleanupEngine::pruneBackups(const QString& root, int maxBackups, qint64 max
     const BackupInfo info = backupInfo(root);
     bool ok = true;
     qint64 remainingBytes = info.totalBytes;
-    for (int i = 0; i < info.backups.size(); ++i) {
-        if (i < maxBackups && remainingBytes <= maxBytes) {
-            continue;
-        }
+    int remainingCount = info.backups.size();
+    for (int i = info.backups.size() - 1;
+         i >= 0 && (remainingCount > qMax(0, maxBackups) || remainingBytes > qMax<qint64>(0, maxBytes));
+         --i) {
         QString error;
         if (deleteBackupItem(info.backups.at(i), &error)) {
             remainingBytes -= info.backups.at(i).size;
+            --remainingCount;
         } else {
             ok = false;
         }
@@ -513,6 +544,25 @@ qint64 CleanupEngine::fileSize(const QString& path) {
 }
 
 QString CleanupEngine::defaultBackupRoot() {
+#ifdef Q_OS_WIN
+    const QString systemDrive = QDir::cleanPath(qEnvironmentVariable("SystemDrive", "C:") + QLatin1Char('/')).toUpper();
+    for (QStorageInfo storage : QStorageInfo::mountedVolumes()) {
+        storage.refresh();
+        const QString root = QDir::cleanPath(storage.rootPath()).toUpper();
+        if (!storage.isValid() || !storage.isReady() || storage.isReadOnly()
+            || root == systemDrive || storage.bytesAvailable() < 256LL * 1024LL * 1024LL) {
+            continue;
+        }
+        const QString nativeRoot = QDir::toNativeSeparators(storage.rootPath());
+        if (GetDriveTypeW(reinterpret_cast<LPCWSTR>(nativeRoot.utf16())) != DRIVE_FIXED) {
+            continue;
+        }
+        const QString candidate = QDir(storage.rootPath()).filePath(QStringLiteral("C_DiskGlow_Backups"));
+        if (QDir().mkpath(candidate)) {
+            return candidate;
+        }
+    }
+#endif
     const QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     return QDir(base.isEmpty() ? QDir::homePath() : base).filePath(QStringLiteral("backups"));
 }
@@ -559,26 +609,16 @@ void CleanupEngine::collectRuleFiles(
 
 bool CleanupEngine::emptyRecycleBin(QString* error) {
 #ifdef Q_OS_WIN
-    QProcess process;
-    process.start(QStringLiteral("powershell"), {
-        QStringLiteral("-NoProfile"),
-        QStringLiteral("-Command"),
-        QStringLiteral("Clear-RecycleBin -DriveLetter C -Force -ErrorAction Stop")
-    });
-    if (!process.waitForFinished(30000)) {
-        process.kill();
-        process.waitForFinished();
-        if (error) {
-            *error = QStringLiteral("清空回收站超时。");
-        }
-        return false;
-    }
-    if (process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0) {
+    const HRESULT result = SHEmptyRecycleBinW(
+        nullptr,
+        L"C:\\",
+        SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND
+    );
+    if (SUCCEEDED(result)) {
         return true;
     }
     if (error) {
-        const QString details = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
-        *error = details.isEmpty() ? QStringLiteral("清空回收站失败，退出码: %1").arg(process.exitCode()) : details;
+        *error = QStringLiteral("清空回收站失败，错误码: 0x%1").arg(static_cast<qulonglong>(result), 0, 16);
     }
     return false;
 #else

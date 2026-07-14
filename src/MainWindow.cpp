@@ -40,7 +40,6 @@
 #include <QStorageInfo>
 #include <QStyle>
 #include <QTableWidgetItem>
-#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -51,12 +50,25 @@ namespace {
 constexpr int PathRole = Qt::UserRole + 10;
 constexpr int CommandRole = Qt::UserRole + 11;
 constexpr int AppIndexRole = Qt::UserRole + 12;
+constexpr int ContextActionRole = Qt::UserRole + 13;
 const QString OptimizationStateKey = QStringLiteral("state/applied_optimizations");
 const QString GpuStateKey = QStringLiteral("state/applied_gpu_actions");
 
 struct CommandBatchResult {
     QString output;
     QMap<QString, int> exitCodes;
+};
+
+struct BatchUninstallResult {
+    int completed = 0;
+    QStringList errors;
+    QStringList registryBackups;
+};
+
+struct GlobalRestoreResult {
+    QStringList output;
+    QStringList restoredOptimizationIds;
+    QStringList restoredGpuIds;
 };
 
 QSet<QString> appliedActionIds(const QString& key) {
@@ -431,7 +443,11 @@ QWidget* MainWindow::createCleanPage() {
     cleanWatcher_ = new QFutureWatcher<CleanResult>(this);
     connect(cleanWatcher_, &QFutureWatcher<CleanResult>::finished, this, [this] {
         const CleanResult result = cleanWatcher_->result();
-        const QString message = cleanResultMessage(result);
+        const qint64 freeAfter = cleanupEngine_.diskInfo().freeBytes;
+        const qint64 netChange = cleanFreeBytesBefore_ >= 0 ? freeAfter - cleanFreeBytesBefore_ : result.cleanedBytes;
+        const QString message = cleanResultMessage(result)
+            + QStringLiteral("\nC 盘可用空间实际变化: %1%2")
+                .arg(netChange >= 0 ? QStringLiteral("+") : QString(), CleanupEngine::formatSize(netChange));
         showOperationLog(QStringLiteral("清理完成: %1，失败 %2").arg(CleanupEngine::formatSize(result.cleanedBytes)).arg(result.errors.size()));
         if (result.errors.isEmpty()) {
             QMessageBox::information(this, QStringLiteral("清理完成"), message);
@@ -439,6 +455,8 @@ QWidget* MainWindow::createCleanPage() {
             QMessageBox::warning(this, QStringLiteral("清理完成"), message);
         }
         refreshDiskInfo();
+        reclaimSpaceLabel_->setText(QStringLiteral("实际释放 %1").arg(CleanupEngine::formatSize(qMax<qint64>(0, netChange))));
+        cleanFreeBytesBefore_ = -1;
         startScan();
     });
     return page;
@@ -775,6 +793,14 @@ QWidget* MainWindow::createFilePage() {
     fileStatusLabel_ = new QLabel(QStringLiteral("文件管理已就绪。"), page);
     fileStatusLabel_->setObjectName(QStringLiteral("statusStrip"));
     layout->addWidget(fileStatusLabel_);
+    folderUsageWatcher_ = new QFutureWatcher<FolderUsageScan>(this);
+    connect(folderUsageWatcher_, &QFutureWatcher<FolderUsageScan>::finished, this, [this] {
+        populateFolderUsage(folderUsageWatcher_->result());
+    });
+    managedFileWatcher_ = new QFutureWatcher<QVector<ManagedFileEntry>>(this);
+    connect(managedFileWatcher_, &QFutureWatcher<QVector<ManagedFileEntry>>::finished, this, [this] {
+        populateManagedFiles(managedFileWatcher_->result());
+    });
     return page;
 }
 
@@ -969,7 +995,8 @@ void MainWindow::setTableRowMetadata(
     const QString& description,
     const QString& risk,
     const QString& path,
-    const QString& command
+    const QString& command,
+    const QString& actionId
 ) {
     const QString tooltip = QStringLiteral("功能说明: %1\n适用场景: 当前列表项目\n风险等级: %2")
         .arg(description, risk);
@@ -982,6 +1009,97 @@ void MainWindow::setTableRowMetadata(
     if (anchor) {
         anchor->setData(PathRole, path);
         anchor->setData(CommandRole, command);
+        anchor->setData(ContextActionRole, actionId);
+    }
+}
+
+void MainWindow::runShellCommandAsync(const QString& title, const QString& command) {
+    globalStatusLabel_->setText(QStringLiteral("正在执行: %1").arg(title));
+    auto* watcher = new QFutureWatcher<CommandBatchResult>(this);
+    connect(watcher, &QFutureWatcher<CommandBatchResult>::finished, this, [this, watcher, title] {
+        const CommandBatchResult result = watcher->result();
+        const int exitCode = result.exitCodes.value(QStringLiteral("command"), -1);
+        showOperationLog(QStringLiteral("%1，退出码 %2").arg(title).arg(exitCode));
+        QMessageBox::information(this, title, QStringLiteral("退出码 %1\n%2").arg(exitCode).arg(result.output));
+        watcher->deleteLater();
+    });
+    watcher->setFuture(QtConcurrent::run([command] {
+        CommandBatchResult result;
+        int exitCode = 0;
+        result.output = SystemCatalog::runCommand(command, &exitCode);
+        result.exitCodes.insert(QStringLiteral("command"), exitCode);
+        return result;
+    }));
+}
+
+void MainWindow::runContextAction(const QString& actionId) {
+    const int separator = actionId.indexOf(QLatin1Char(':'));
+    const QString kind = separator < 0 ? actionId : actionId.left(separator);
+    const QString value = separator < 0 ? QString() : actionId.mid(separator + 1);
+    if (kind == QStringLiteral("cleanup")) {
+        const QVector<CleanupEntry> visible = cleanupEngine_.entriesForMode(cleanupEntries_, currentCleanMode());
+        bool ok = false;
+        const int index = value.toInt(&ok);
+        if (ok && index >= 0 && index < visible.size()) {
+            cleanEntries({visible.at(index)});
+        }
+        return;
+    }
+    if (kind == QStringLiteral("uninstall")) {
+        uninstallApplication(value.toInt(), false);
+        return;
+    }
+    if (kind == QStringLiteral("optimization")) {
+        const QVector<QVector<WindowsOptimizationAction>> groups = {
+            SystemCatalog::officeOptimizationActions(),
+            SystemCatalog::gamingOptimizationActions(),
+            SystemCatalog::advancedControlActions(),
+        };
+        for (const QVector<WindowsOptimizationAction>& actions : groups) {
+            for (const WindowsOptimizationAction& action : actions) {
+                if (action.id == value) {
+                    runOptimizationAction(action, false);
+                    return;
+                }
+            }
+        }
+        return;
+    }
+    if (kind == QStringLiteral("gpu")) {
+        runGpuAction(value.toInt(), false);
+        return;
+    }
+    if (kind == QStringLiteral("migration")) {
+        const QString key = value;
+        const MigrationFolder folder = fileEngine_.migrationFolderByKey(key);
+        if (folder.key.isEmpty()) {
+            return;
+        }
+        if (folder.migrated) {
+            if (confirmAction(this, QStringLiteral("还原迁移目录"), QStringLiteral("将“%1”还原到原路径，是否继续？").arg(folder.name))) {
+                runFileOperationAsync(QStringLiteral("还原迁移目录"), [key] {
+                    return FileManagementEngine().restorePersonalFolder(key);
+                }, [this] { refreshMigrationFolders(); });
+            }
+        } else {
+            const QString targetRoot = migrationTargetEdit_->text().trimmed();
+            if (targetRoot.isEmpty()) {
+                QMessageBox::information(this, QStringLiteral("系统目录迁移"), QStringLiteral("请先选择目标目录。"));
+            } else if (confirmAction(this, QStringLiteral("系统目录迁移"), QStringLiteral("将“%1”迁移到 %2，是否继续？").arg(folder.name, targetRoot))) {
+                runFileOperationAsync(QStringLiteral("系统目录迁移"), [key, targetRoot] {
+                    return FileManagementEngine().migratePersonalFolder(key, targetRoot, true);
+                }, [this] { refreshMigrationFolders(); });
+            }
+        }
+        return;
+    }
+    if (kind == QStringLiteral("repair")) {
+        for (const RepairItem& item : SystemCatalog::repairActions()) {
+            if (item.id == value) {
+                runRepairCommand(item);
+                return;
+            }
+        }
     }
 }
 
@@ -1000,6 +1118,7 @@ void MainWindow::installTableContextMenu(QTableWidget* table, int pathColumn, in
         const QString command = commandColumn >= 0 && table->item(row, commandColumn)
             ? table->item(row, commandColumn)->text()
             : (anchor ? anchor->data(CommandRole).toString() : QString());
+        const QString actionId = anchor ? anchor->data(ContextActionRole).toString() : QString();
 
         QMenu menu(this);
         QAction* open = menu.addAction(QStringLiteral("打开文件位置"));
@@ -1013,7 +1132,7 @@ void MainWindow::installTableContextMenu(QTableWidget* table, int pathColumn, in
         copy->setEnabled(!path.isEmpty());
         whitelist->setEnabled(!path.isEmpty());
         viewCommand->setEnabled(!command.isEmpty());
-        run->setEnabled(!command.isEmpty());
+        run->setEnabled(!actionId.isEmpty() || !command.isEmpty());
         QAction* selected = menu.exec(table->viewport()->mapToGlobal(position));
         if (selected == open) {
             const QFileInfo info(path);
@@ -1022,11 +1141,10 @@ void MainWindow::installTableContextMenu(QTableWidget* table, int pathColumn, in
             qApp->clipboard()->setText(QDir::toNativeSeparators(path));
         } else if (selected == viewCommand) {
             QMessageBox::information(this, QStringLiteral("底层命令"), command);
+        } else if (selected == run && !actionId.isEmpty()) {
+            runContextAction(actionId);
         } else if (selected == run && confirmAction(this, QStringLiteral("单独执行"), QStringLiteral("确认执行以下命令？\n\n%1").arg(command))) {
-            int exitCode = 0;
-            const QString output = SystemCatalog::runCommand(command, &exitCode);
-            showOperationLog(QStringLiteral("右键单独执行命令，退出码 %1").arg(exitCode));
-            QMessageBox::information(this, QStringLiteral("执行结果"), output);
+            runShellCommandAsync(QStringLiteral("右键单独执行"), command);
         } else if (selected == whitelist) {
             addToWhitelist(path);
         } else if (selected == logs) {
@@ -1044,6 +1162,7 @@ void MainWindow::installTreeContextMenu(QTreeWidget* tree, int pathColumn, int c
         }
         const QString path = pathColumn >= 0 ? item->text(pathColumn) : item->data(0, PathRole).toString();
         const QString command = commandColumn >= 0 ? item->text(commandColumn) : item->data(0, CommandRole).toString();
+        const QString actionId = item->data(0, ContextActionRole).toString();
         QMenu menu(this);
         QAction* open = menu.addAction(QStringLiteral("打开文件位置"));
         QAction* copy = menu.addAction(QStringLiteral("复制完整路径"));
@@ -1056,7 +1175,7 @@ void MainWindow::installTreeContextMenu(QTreeWidget* tree, int pathColumn, int c
         copy->setEnabled(!path.isEmpty());
         whitelist->setEnabled(!path.isEmpty());
         viewCommand->setEnabled(!command.isEmpty());
-        run->setEnabled(!command.isEmpty());
+        run->setEnabled(!actionId.isEmpty() || !command.isEmpty());
         QAction* selected = menu.exec(tree->viewport()->mapToGlobal(position));
         if (selected == open) {
             const QFileInfo info(path);
@@ -1065,10 +1184,10 @@ void MainWindow::installTreeContextMenu(QTreeWidget* tree, int pathColumn, int c
             qApp->clipboard()->setText(QDir::toNativeSeparators(path));
         } else if (selected == viewCommand) {
             QMessageBox::information(this, QStringLiteral("底层命令"), command);
+        } else if (selected == run && !actionId.isEmpty()) {
+            runContextAction(actionId);
         } else if (selected == run && confirmAction(this, QStringLiteral("单独执行"), QStringLiteral("确认执行以下命令？\n\n%1").arg(command))) {
-            int exitCode = 0;
-            QMessageBox::information(this, QStringLiteral("执行结果"), SystemCatalog::runCommand(command, &exitCode));
-            showOperationLog(QStringLiteral("右键单独执行命令，退出码 %1").arg(exitCode));
+            runShellCommandAsync(QStringLiteral("右键单独执行"), command);
         } else if (selected == whitelist) {
             addToWhitelist(path);
         } else if (selected == logs) {
@@ -1143,6 +1262,7 @@ void MainWindow::populateCleanupTree() {
         row->setText(4, QDir::toNativeSeparators(entry.path));
         row->setData(0, Qt::UserRole, i);
         row->setData(0, CommandRole, QStringLiteral("清理引擎删除所列路径并在删除前自动备份"));
+        row->setData(0, ContextActionRole, QStringLiteral("cleanup:%1").arg(i));
         const bool whitelisted = isWhitelisted(entry.path);
         row->setCheckState(0, whitelisted ? Qt::Unchecked : Qt::Checked);
         row->setDisabled(whitelisted);
@@ -1205,6 +1325,14 @@ void MainWindow::cleanSelected() {
         return;
     }
     const QVector<CleanupEntry> selected = selectedCleanupEntries();
+    cleanEntries(selected);
+}
+
+void MainWindow::cleanEntries(const QVector<CleanupEntry>& selected) {
+    if (scanWatcher_->isRunning() || (cleanWatcher_ && cleanWatcher_->isRunning())) {
+        QMessageBox::information(this, QStringLiteral("清理选中"), QStringLiteral("扫描或清理正在进行，请等待完成。"));
+        return;
+    }
     if (selected.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("清理选中"), QStringLiteral("请先扫描并勾选需要清理的项目。"));
         return;
@@ -1221,6 +1349,7 @@ void MainWindow::cleanSelected() {
     options.simulate = false;
     options.allowScanOnly = currentCleanMode() == CleanupEngine::CleanMode::Deep;
     options.backupRoot = backupRoot_;
+    cleanFreeBytesBefore_ = cleanupEngine_.diskInfo().freeBytes;
     cleanStatusLabel_->setText(QStringLiteral("正在清理并备份选中项目..."));
     cleanWatcher_->setFuture(QtConcurrent::run([selected, options] {
         return CleanupEngine().cleanEntriesDetailed(selected, options);
@@ -1330,7 +1459,7 @@ void MainWindow::populateUninstallTable() {
         connect(strong, &QPushButton::clicked, this, [this, i] { uninstallApplication(i, true); });
         uninstallTable_->setCellWidget(row, 8, normal);
         uninstallTable_->setCellWidget(row, 9, strong);
-        setTableRowMetadata(uninstallTable_, row, QStringLiteral("卸载 %1；卸载前自动备份注册表，完成后可扫描残留。").arg(app.name), QStringLiteral("谨慎"), app.installLocation, app.uninstallCommand);
+        setTableRowMetadata(uninstallTable_, row, QStringLiteral("卸载 %1；卸载前自动备份注册表，完成后可扫描残留。").arg(app.name), QStringLiteral("谨慎"), app.installLocation, app.uninstallCommand, QStringLiteral("uninstall:%1").arg(i));
     }
     uninstallTable_->setSortingEnabled(true);
 }
@@ -1362,17 +1491,27 @@ void MainWindow::uninstallApplication(int appIndex, bool strong) {
     if (!confirmAction(this, strong ? QStringLiteral("强力粉碎卸载") : QStringLiteral("常规卸载"), QStringLiteral("%1\n\n软件: %2").arg(prompt, app.name))) {
         return;
     }
-    const UninstallResult result = uninstallEngine_.startUninstall(app);
-    if (!result.errors.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("软件卸载"), result.errors.join(QStringLiteral("\n")));
-        return;
-    }
-    showOperationLog(QStringLiteral("启动%1: %2，注册表备份: %3")
-        .arg(strong ? QStringLiteral("强力卸载") : QStringLiteral("常规卸载"), app.name, result.registryBackup));
-    if (strong) {
-        QTimer::singleShot(1000, this, [this, app] { cleanApplicationResiduals(app); });
-    }
-    QTimer::singleShot(7000, this, &MainWindow::refreshInstalledApps);
+    globalStatusLabel_->setText(QStringLiteral("正在等待卸载完成: %1").arg(app.name));
+    auto* watcher = new QFutureWatcher<UninstallResult>(this);
+    connect(watcher, &QFutureWatcher<UninstallResult>::finished, this, [this, watcher, app, strong] {
+        const UninstallResult result = watcher->result();
+        showOperationLog(QStringLiteral("%1完成: %2，退出码 %3，注册表备份: %4")
+            .arg(strong ? QStringLiteral("强力卸载") : QStringLiteral("常规卸载"), app.name)
+            .arg(result.exitCode)
+            .arg(result.registryBackup));
+        if (!result.errors.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("软件卸载"), result.errors.join(QStringLiteral("\n")));
+        } else if (result.completed && strong) {
+            cleanApplicationResiduals(app);
+        } else if (result.completed) {
+            QMessageBox::information(this, QStringLiteral("软件卸载"), QStringLiteral("卸载程序已结束: %1").arg(app.name));
+        }
+        watcher->deleteLater();
+        refreshInstalledApps();
+    });
+    watcher->setFuture(QtConcurrent::run([app] {
+        return SoftwareUninstallEngine().startUninstall(app);
+    }));
 }
 
 void MainWindow::uninstallSelectedApplications() {
@@ -1390,17 +1529,47 @@ void MainWindow::uninstallSelectedApplications() {
     if (!confirmAction(this, QStringLiteral("批量卸载"), QStringLiteral("将依次启动 %1 个软件的标准卸载程序。是否继续？").arg(indexes.size()))) {
         return;
     }
-    int started = 0;
-    QStringList errors;
+    QVector<InstalledApplication> applications;
     for (int index : indexes) {
-        const UninstallResult result = uninstallEngine_.startUninstall(installedApps_.at(index));
-        if (result.started) {
-            ++started;
+        if (index >= 0 && index < installedApps_.size()) {
+            applications.push_back(installedApps_.at(index));
         }
-        errors.append(result.errors);
     }
-    showOperationLog(QStringLiteral("批量卸载启动 %1 项，失败 %2 项").arg(started).arg(errors.size()));
-    QMessageBox::information(this, QStringLiteral("批量卸载"), QStringLiteral("已启动 %1 项，失败 %2 项。\n%3").arg(started).arg(errors.size()).arg(errors.join(QStringLiteral("\n"))));
+    globalStatusLabel_->setText(QStringLiteral("正在依次卸载 %1 个软件...").arg(applications.size()));
+    auto* watcher = new QFutureWatcher<BatchUninstallResult>(this);
+    connect(watcher, &QFutureWatcher<BatchUninstallResult>::finished, this, [this, watcher] {
+        const BatchUninstallResult result = watcher->result();
+        showOperationLog(QStringLiteral("批量卸载完成 %1 项，错误 %2 项")
+            .arg(result.completed)
+            .arg(result.errors.size()));
+        QMessageBox::information(
+            this,
+            QStringLiteral("批量卸载"),
+            QStringLiteral("已完成 %1 项，错误 %2 项。\n%3")
+                .arg(result.completed)
+                .arg(result.errors.size())
+                .arg(result.errors.join(QStringLiteral("\n")))
+        );
+        watcher->deleteLater();
+        refreshInstalledApps();
+    });
+    watcher->setFuture(QtConcurrent::run([applications] {
+        BatchUninstallResult batch;
+        SoftwareUninstallEngine engine;
+        for (const InstalledApplication& app : applications) {
+            const UninstallResult result = engine.startUninstall(app);
+            if (result.completed) {
+                ++batch.completed;
+            }
+            if (!result.registryBackup.isEmpty()) {
+                batch.registryBackups.push_back(result.registryBackup);
+            }
+            for (const QString& error : result.errors) {
+                batch.errors.push_back(QStringLiteral("%1: %2").arg(app.name, error));
+            }
+        }
+        return batch;
+    }));
 }
 
 void MainWindow::cleanApplicationResiduals(const InstalledApplication& app) {
@@ -1443,7 +1612,7 @@ void MainWindow::populateOptimizationTable(QTableWidget* table, const QVector<Wi
         connect(restore, &QPushButton::clicked, this, [this, action] { runOptimizationAction(action, true); });
         table->setCellWidget(row, 5, apply);
         table->setCellWidget(row, 6, restore);
-        setTableRowMetadata(table, row, action.description, action.riskLabel, {}, commandsText(action.commands));
+        setTableRowMetadata(table, row, action.description, action.riskLabel, {}, commandsText(action.commands), QStringLiteral("optimization:%1").arg(action.id));
         if (action.riskLabel.contains(QStringLiteral("高危")) || action.riskLabel.contains(QStringLiteral("谨慎"))) {
             for (int column = 0; column < 5; ++column) {
                 table->item(row, column)->setBackground(QBrush(riskColor(action.riskLabel)));
@@ -1466,11 +1635,14 @@ void MainWindow::runOptimizationAction(const WindowsOptimizationAction& action, 
         return;
     }
     globalStatusLabel_->setText(QStringLiteral("正在%1: %2").arg(revert ? QStringLiteral("还原") : QStringLiteral("执行"), action.title));
+    if (!revert && !action.revertCommands.isEmpty()) {
+        setActionApplied(OptimizationStateKey, action.id, true);
+    }
     auto* watcher = new QFutureWatcher<CommandBatchResult>(this);
     connect(watcher, &QFutureWatcher<CommandBatchResult>::finished, this, [this, watcher, action, revert] {
         const CommandBatchResult result = watcher->result();
         const int exitCode = result.exitCodes.value(action.id, -1);
-        if (exitCode == 0) {
+        if (exitCode == 0 && revert) {
             setActionApplied(OptimizationStateKey, action.id, !revert);
         }
         showOperationLog(QStringLiteral("%1优化项 %2，退出码 %3").arg(revert ? QStringLiteral("还原") : QStringLiteral("执行"), action.title).arg(exitCode));
@@ -1480,7 +1652,7 @@ void MainWindow::runOptimizationAction(const WindowsOptimizationAction& action, 
     watcher->setFuture(QtConcurrent::run([action, commands] {
         CommandBatchResult result;
         int exitCode = 0;
-        result.output = SystemCatalog::runActionCommands(commands, &exitCode);
+        result.output = SystemCatalog::runOptimizationAction(action, revert, &exitCode);
         result.exitCodes.insert(action.id, exitCode);
         return result;
     }));
@@ -1513,14 +1685,16 @@ void MainWindow::applyOptimizationPreset(
         return;
     }
     globalStatusLabel_->setText(QStringLiteral("正在执行: %1").arg(title));
+    for (const WindowsOptimizationAction& action : selected) {
+        if (!action.revertCommands.isEmpty()) {
+            setActionApplied(OptimizationStateKey, action.id, true);
+        }
+    }
     auto* watcher = new QFutureWatcher<CommandBatchResult>(this);
     connect(watcher, &QFutureWatcher<CommandBatchResult>::finished, this, [this, watcher, selected, title] {
         const CommandBatchResult result = watcher->result();
         for (const WindowsOptimizationAction& action : selected) {
             const int exitCode = result.exitCodes.value(action.id, -1);
-            if (exitCode == 0) {
-                setActionApplied(OptimizationStateKey, action.id, true);
-            }
             showOperationLog(QStringLiteral("%1: %2，退出码 %3").arg(title, action.title).arg(exitCode));
         }
         QMessageBox::information(this, title, result.output.left(12000));
@@ -1532,7 +1706,7 @@ void MainWindow::applyOptimizationPreset(
         for (const WindowsOptimizationAction& action : selected) {
             int exitCode = 0;
             outputs.push_back(QStringLiteral("[%1]\n%2")
-                .arg(action.title, SystemCatalog::runActionCommands(action.commands, &exitCode)));
+                .arg(action.title, SystemCatalog::runOptimizationAction(action, false, &exitCode)));
             result.exitCodes.insert(action.id, exitCode);
         }
         result.output = outputs.join(QStringLiteral("\n\n"));
@@ -1601,7 +1775,7 @@ void MainWindow::populateGpuActions() {
         connect(restore, &QPushButton::clicked, this, [this, i] { runGpuAction(i, true); });
         gpuActionTable_->setCellWidget(row, 4, apply);
         gpuActionTable_->setCellWidget(row, 5, restore);
-        setTableRowMetadata(gpuActionTable_, row, action.description, action.riskLabel, {}, commandsText(action.commands));
+        setTableRowMetadata(gpuActionTable_, row, action.description, action.riskLabel, {}, commandsText(action.commands), QStringLiteral("gpu:%1").arg(i));
     }
 }
 
@@ -1622,16 +1796,15 @@ void MainWindow::runGpuAction(int actionIndex, bool revert) {
         return;
     }
     globalStatusLabel_->setText(QStringLiteral("正在%1: %2").arg(revert ? QStringLiteral("还原") : QStringLiteral("执行"), action.title));
+    if (!revert && !action.revertCommands.isEmpty()) {
+        setActionApplied(GpuStateKey, action.id, true);
+    }
     auto* watcher = new QFutureWatcher<CommandBatchResult>(this);
     connect(watcher, &QFutureWatcher<CommandBatchResult>::finished, this, [this, watcher, action, revert] {
         const CommandBatchResult result = watcher->result();
         const int exitCode = result.exitCodes.value(action.id, -1);
-        if (exitCode == 0) {
-            if (action.id == QStringLiteral("gpu_restore_defaults")) {
-                QSettings().remove(GpuStateKey);
-            } else {
-                setActionApplied(GpuStateKey, action.id, !revert);
-            }
+        if (exitCode == 0 && revert) {
+            setActionApplied(GpuStateKey, action.id, false);
         }
         const QString log = QStringLiteral("%1显卡操作 %2，退出码 %3").arg(revert ? QStringLiteral("还原") : QStringLiteral("执行"), action.title).arg(exitCode);
         gpuLog_->append(log);
@@ -1639,10 +1812,13 @@ void MainWindow::runGpuAction(int actionIndex, bool revert) {
         QMessageBox::information(this, action.title, QStringLiteral("退出码 %1\n%2").arg(exitCode).arg(result.output));
         watcher->deleteLater();
     });
-    watcher->setFuture(QtConcurrent::run([action, commands] {
+    watcher->setFuture(QtConcurrent::run([action, revert] {
         CommandBatchResult result;
         int exitCode = 0;
-        result.output = SystemCatalog::runActionCommands(commands, &exitCode);
+        GpuOptimizationEngine engine;
+        result.output = revert
+            ? engine.restoreAction(action, &exitCode)
+            : engine.runAction(action, &exitCode);
         result.exitCodes.insert(action.id, exitCode);
         return result;
     }));
@@ -1704,28 +1880,25 @@ void MainWindow::selectDiskRoot(const QString& rootPath) {
 }
 
 void MainWindow::scanFolderUsage() {
+    if (!folderUsageWatcher_ || folderUsageWatcher_->isRunning()) {
+        QMessageBox::information(this, QStringLiteral("磁盘扫描"), QStringLiteral("空间扫描正在进行，请等待完成。"));
+        return;
+    }
     const QString root = fileRoot_.isEmpty() ? defaultDiskRoot() : fileRoot_;
     fileStatusLabel_->setText(QStringLiteral("正在扫描空间占用: %1").arg(QDir::toNativeSeparators(root)));
-    auto* watcher = new QFutureWatcher<FolderUsageScan>(this);
-    connect(watcher, &QFutureWatcher<FolderUsageScan>::finished, this, [this, watcher] {
-        populateFolderUsage(watcher->result());
-        watcher->deleteLater();
-    });
-    watcher->setFuture(QtConcurrent::run([root] {
+    folderUsageWatcher_->setFuture(QtConcurrent::run([root] {
         return FileManagementEngine().scanFolderUsageDetailed(root, 80, 60000);
     }));
 }
 
 void MainWindow::scanManagedFiles() {
+    if (!managedFileWatcher_ || managedFileWatcher_->isRunning()) {
+        return;
+    }
     const QString root = fileRoot_.isEmpty() ? defaultDiskRoot() : fileRoot_;
     const ManagedFileType type = static_cast<ManagedFileType>(fileTypeCombo_->currentData().toInt());
     fileStatusLabel_->setText(QStringLiteral("正在扫描%1文件...").arg(FileManagementEngine::typeLabel(type)));
-    auto* watcher = new QFutureWatcher<QVector<ManagedFileEntry>>(this);
-    connect(watcher, &QFutureWatcher<QVector<ManagedFileEntry>>::finished, this, [this, watcher] {
-        populateManagedFiles(watcher->result());
-        watcher->deleteLater();
-    });
-    watcher->setFuture(QtConcurrent::run([root, type] {
+    managedFileWatcher_->setFuture(QtConcurrent::run([root, type] {
         return FileManagementEngine().listFiles(root, type, 5000);
     }));
 }
@@ -1764,6 +1937,42 @@ QStringList MainWindow::selectedManagedPaths() const {
     return paths;
 }
 
+void MainWindow::runFileOperationAsync(
+    const QString& title,
+    const std::function<FileOperationResult()>& operation,
+    const std::function<void()>& completed
+) {
+    if (fileOperationRunning_) {
+        QMessageBox::information(this, title, QStringLiteral("另一个文件操作正在执行，请等待完成。"));
+        return;
+    }
+    fileOperationRunning_ = true;
+    fileStatusLabel_->setText(QStringLiteral("正在执行: %1").arg(title));
+    auto* watcher = new QFutureWatcher<FileOperationResult>(this);
+    connect(watcher, &QFutureWatcher<FileOperationResult>::finished, this, [this, watcher, title, completed] {
+        const FileOperationResult result = watcher->result();
+        fileOperationRunning_ = false;
+        fileStatusLabel_->setText(QStringLiteral("%1完成: 成功 %2，失败 %3")
+            .arg(title)
+            .arg(result.affectedPaths.size())
+            .arg(result.errors.size()));
+        showOperationLog(fileStatusLabel_->text());
+        const QString details = result.errors.isEmpty()
+            ? (result.output.trimmed().isEmpty() ? QStringLiteral("操作完成。") : result.output)
+            : result.errors.join(QStringLiteral("\n"));
+        if (result.errors.isEmpty()) {
+            QMessageBox::information(this, title, details.left(12000));
+        } else {
+            QMessageBox::warning(this, title, details.left(12000));
+        }
+        if (completed) {
+            completed();
+        }
+        watcher->deleteLater();
+    });
+    watcher->setFuture(QtConcurrent::run(operation));
+}
+
 void MainWindow::copySelectedFiles() {
     const QStringList paths = selectedManagedPaths();
     if (paths.isEmpty()) {
@@ -1771,12 +1980,12 @@ void MainWindow::copySelectedFiles() {
         return;
     }
     const QString target = QFileDialog::getExistingDirectory(this, QStringLiteral("选择复制目标"), fileRoot_);
-    if (target.isEmpty()) {
+    if (target.isEmpty() || !confirmAction(this, QStringLiteral("跨盘复制"), QStringLiteral("将复制 %1 个文件到 %2，是否继续？").arg(paths.size()).arg(target))) {
         return;
     }
-    const FileOperationResult result = fileEngine_.copyFiles(paths, target);
-    showOperationLog(QStringLiteral("复制文件 %1 个，失败 %2 个").arg(result.affectedPaths.size()).arg(result.errors.size()));
-    QMessageBox::information(this, QStringLiteral("复制完成"), QStringLiteral("成功 %1，失败 %2。\n%3").arg(result.affectedPaths.size()).arg(result.errors.size()).arg(result.errors.join(QStringLiteral("\n"))));
+    runFileOperationAsync(QStringLiteral("跨盘复制"), [paths, target] {
+        return FileManagementEngine().copyFiles(paths, target);
+    });
 }
 
 void MainWindow::moveSelectedFiles() {
@@ -1789,28 +1998,28 @@ void MainWindow::moveSelectedFiles() {
     if (target.isEmpty() || !confirmAction(this, QStringLiteral("移动文件"), QStringLiteral("将移动 %1 个文件到 %2，是否继续？").arg(paths.size()).arg(target))) {
         return;
     }
-    const FileOperationResult result = fileEngine_.moveFiles(paths, target);
-    showOperationLog(QStringLiteral("移动文件 %1 个，失败 %2 个").arg(result.affectedPaths.size()).arg(result.errors.size()));
-    scanManagedFiles();
+    runFileOperationAsync(QStringLiteral("移动文件"), [paths, target] {
+        return FileManagementEngine().moveFiles(paths, target);
+    }, [this] { scanManagedFiles(); });
 }
 
 void MainWindow::renameSelectedFile() {
     const QStringList paths = selectedManagedPaths();
-    if (paths.size() != 1) {
-        QMessageBox::information(this, QStringLiteral("批量重命名"), QStringLiteral("当前版本请逐个选择文件重命名。"));
+    if (paths.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("批量重命名"), QStringLiteral("请先选择一个或多个文件。"));
         return;
     }
     bool ok = false;
-    const QString newName = QInputDialog::getText(this, QStringLiteral("重命名"), QStringLiteral("新文件名:"), QLineEdit::Normal, QFileInfo(paths.first()).fileName(), &ok);
-    if (!ok || newName.trimmed().isEmpty()) {
+    const QString prefix = QInputDialog::getText(this, QStringLiteral("批量重命名"), QStringLiteral("统一文件名前缀（自动添加 _001 编号并保留扩展名）:"), QLineEdit::Normal, QStringLiteral("文件"), &ok);
+    if (!ok || prefix.trimmed().isEmpty()) {
         return;
     }
-    const FileOperationResult result = fileEngine_.renameFile(paths.first(), newName.trimmed());
-    showOperationLog(QStringLiteral("重命名文件: %1").arg(paths.first()));
-    if (!result.errors.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("重命名"), result.errors.join(QStringLiteral("\n")));
+    if (!confirmAction(this, QStringLiteral("批量重命名"), QStringLiteral("将重命名 %1 个文件，是否继续？").arg(paths.size()))) {
+        return;
     }
-    scanManagedFiles();
+    runFileOperationAsync(QStringLiteral("批量重命名"), [paths, prefix] {
+        return FileManagementEngine().renameFiles(paths, prefix);
+    }, [this] { scanManagedFiles(); });
 }
 
 void MainWindow::deleteSelectedFiles() {
@@ -1818,19 +2027,19 @@ void MainWindow::deleteSelectedFiles() {
     if (paths.isEmpty() || !confirmAction(this, QStringLiteral("批量删除"), QStringLiteral("将永久删除 %1 个文件。是否继续？").arg(paths.size()))) {
         return;
     }
-    const FileOperationResult result = fileEngine_.deleteFiles(paths);
-    showOperationLog(QStringLiteral("删除文件 %1 个，失败 %2 个").arg(result.affectedPaths.size()).arg(result.errors.size()));
-    scanManagedFiles();
+    runFileOperationAsync(QStringLiteral("批量删除"), [paths] {
+        return FileManagementEngine().deleteFiles(paths);
+    }, [this] { scanManagedFiles(); });
 }
 
 void MainWindow::shredSelectedFiles() {
     const QStringList paths = selectedManagedPaths();
-    if (paths.isEmpty() || !confirmAction(this, QStringLiteral("文件粉碎"), QStringLiteral("将覆写并永久删除 %1 个文件，无法恢复。是否继续？").arg(paths.size()))) {
+    if (paths.isEmpty() || !confirmAction(this, QStringLiteral("文件粉碎"), QStringLiteral("将对 %1 个文件执行两轮覆写后删除。SSD/闪存的磨损均衡可能保留底层副本，本工具不能保证物理不可恢复。是否继续？").arg(paths.size()))) {
         return;
     }
-    const FileOperationResult result = fileEngine_.shredFiles(paths);
-    showOperationLog(QStringLiteral("粉碎文件 %1 个，失败 %2 个").arg(result.affectedPaths.size()).arg(result.errors.size()));
-    scanManagedFiles();
+    runFileOperationAsync(QStringLiteral("文件粉碎"), [paths] {
+        return FileManagementEngine().shredFiles(paths);
+    }, [this] { scanManagedFiles(); });
 }
 
 void MainWindow::repairSelectedFolderPermission() {
@@ -1844,9 +2053,9 @@ void MainWindow::repairSelectedFolderPermission() {
     if (path.isEmpty() || !confirmAction(this, QStringLiteral("文件夹权限修复"), QStringLiteral("将重置目录 ACL 权限:\n%1").arg(path))) {
         return;
     }
-    const FileOperationResult result = fileEngine_.repairFolderPermission(path);
-    showOperationLog(QStringLiteral("修复文件夹权限: %1").arg(path));
-    QMessageBox::information(this, QStringLiteral("权限修复"), result.errors.isEmpty() ? result.output : result.errors.join(QStringLiteral("\n")));
+    runFileOperationAsync(QStringLiteral("文件夹权限修复"), [path] {
+        return FileManagementEngine().repairFolderPermission(path);
+    });
 }
 
 void MainWindow::migrateSelectedFiles() {
@@ -1859,19 +2068,9 @@ void MainWindow::migrateSelectedFiles() {
     if (target.isEmpty() || !confirmAction(this, QStringLiteral("普通文件迁移"), QStringLiteral("将移动 %1 个文件，并在原位置生成快捷方式。是否继续？").arg(paths.size()))) {
         return;
     }
-    const FileOperationResult moved = fileEngine_.moveFiles(paths, target);
-    QStringList errors = moved.errors;
-    for (const QString& source : paths) {
-        const QString destination = QDir(target).filePath(QFileInfo(source).fileName());
-        if (!QFileInfo::exists(destination)) {
-            continue;
-        }
-        const FileOperationResult shortcut = fileEngine_.createShortcut(destination, source + QStringLiteral(".lnk"));
-        errors.append(shortcut.errors);
-    }
-    showOperationLog(QStringLiteral("普通文件迁移 %1 个，失败 %2 个").arg(moved.affectedPaths.size()).arg(errors.size()));
-    QMessageBox::information(this, QStringLiteral("普通文件迁移"), QStringLiteral("迁移 %1 个，失败 %2 个。\n%3").arg(moved.affectedPaths.size()).arg(errors.size()).arg(errors.join(QStringLiteral("\n"))));
-    scanManagedFiles();
+    runFileOperationAsync(QStringLiteral("普通文件迁移"), [paths, target] {
+        return FileManagementEngine().migrateFilesWithShortcuts(paths, target);
+    }, [this] { scanManagedFiles(); });
 }
 
 void MainWindow::populateFolderUsage(const FolderUsageScan& scan) {
@@ -1987,7 +2186,7 @@ void MainWindow::populateMigrationFolders(const QVector<MigrationFolder>& folder
         migrationTable_->setItem(row, 4, textItem(CleanupEngine::formatSize(folder.sizeBytes)));
         migrationTable_->setItem(row, 5, textItem(QDir::toNativeSeparators(folder.path)));
         migrationTable_->setItem(row, 6, textItem(QDir::toNativeSeparators(folder.target)));
-        setTableRowMetadata(migrationTable_, row, QStringLiteral("迁移系统目录并更新注册表、环境变量或目录连接；还原时移回原路径。"), risk, folder.path, QStringLiteral("mklink /J + 更新系统目录注册表或 TEMP/TMP 环境变量"));
+        setTableRowMetadata(migrationTable_, row, QStringLiteral("迁移系统目录并更新注册表、环境变量或目录连接；还原时移回原路径。"), risk, folder.path, QStringLiteral("mklink /J + 更新系统目录注册表或 TEMP/TMP 环境变量"), QStringLiteral("migration:%1").arg(folder.key));
     }
 }
 
@@ -2007,19 +2206,19 @@ void MainWindow::migrateSelectedFolders() {
     if (keys.isEmpty() || !confirmAction(this, QStringLiteral("系统目录迁移"), QStringLiteral("请关闭所有软件。将迁移 %1 个目录到:\n%2\n\n是否继续？").arg(keys.size()).arg(targetRoot))) {
         return;
     }
-    int success = 0;
-    QStringList errors;
-    for (const QString& key : keys) {
-        const FileOperationResult result = fileEngine_.migratePersonalFolder(key, targetRoot, true);
-        if (result.errors.isEmpty()) {
-            ++success;
-        } else {
-            errors.append(result.errors);
+    runFileOperationAsync(QStringLiteral("系统目录迁移"), [keys, targetRoot] {
+        FileOperationResult combined;
+        FileManagementEngine engine;
+        for (const QString& key : keys) {
+            const FileOperationResult result = engine.migratePersonalFolder(key, targetRoot, true);
+            if (result.errors.isEmpty()) {
+                combined.affectedPaths.push_back(key);
+            } else {
+                combined.errors.append(result.errors);
+            }
         }
-    }
-    refreshMigrationFolders();
-    showOperationLog(QStringLiteral("系统目录迁移 %1 项，失败 %2 项").arg(success).arg(errors.size()));
-    QMessageBox::information(this, QStringLiteral("系统目录迁移"), QStringLiteral("成功 %1 项，失败 %2 项。\n%3").arg(success).arg(errors.size()).arg(errors.join(QStringLiteral("\n"))));
+        return combined;
+    }, [this] { refreshMigrationFolders(); });
 }
 
 void MainWindow::restoreSelectedFolders() {
@@ -2033,41 +2232,41 @@ void MainWindow::restoreSelectedFolders() {
     if (keys.isEmpty() || !confirmAction(this, QStringLiteral("还原目录"), QStringLiteral("将还原 %1 个迁移目录到 C 盘默认路径。是否继续？").arg(keys.size()))) {
         return;
     }
-    int success = 0;
-    QStringList errors;
-    for (const QString& key : keys) {
-        const FileOperationResult result = fileEngine_.restorePersonalFolder(key);
-        if (result.errors.isEmpty()) {
-            ++success;
-        } else {
-            errors.append(result.errors);
+    runFileOperationAsync(QStringLiteral("还原迁移目录"), [keys] {
+        FileOperationResult combined;
+        FileManagementEngine engine;
+        for (const QString& key : keys) {
+            const FileOperationResult result = engine.restorePersonalFolder(key);
+            if (result.errors.isEmpty()) {
+                combined.affectedPaths.push_back(key);
+            } else {
+                combined.errors.append(result.errors);
+            }
         }
-    }
-    refreshMigrationFolders();
-    showOperationLog(QStringLiteral("还原迁移目录 %1 项，失败 %2 项").arg(success).arg(errors.size()));
-    QMessageBox::information(this, QStringLiteral("还原目录"), QStringLiteral("成功 %1 项，失败 %2 项。\n%3").arg(success).arg(errors.size()).arg(errors.join(QStringLiteral("\n"))));
+        return combined;
+    }, [this] { refreshMigrationFolders(); });
 }
 
 void MainWindow::restoreAllFolders() {
     if (!confirmAction(this, QStringLiteral("还原所有迁移目录"), QStringLiteral("将所有已迁移目录还原到 C 盘默认路径。请确保 C 盘空间充足。是否继续？"))) {
         return;
     }
-    int success = 0;
-    QStringList errors;
-    for (const MigrationFolder& folder : fileEngine_.scanMigrationFolders()) {
-        if (!folder.migrated) {
-            continue;
+    runFileOperationAsync(QStringLiteral("还原所有迁移目录"), [] {
+        FileOperationResult combined;
+        FileManagementEngine engine;
+        for (const MigrationFolder& folder : engine.scanMigrationFolders()) {
+            if (!folder.migrated) {
+                continue;
+            }
+            const FileOperationResult result = engine.restorePersonalFolder(folder.key);
+            if (result.errors.isEmpty()) {
+                combined.affectedPaths.push_back(folder.key);
+            } else {
+                combined.errors.append(result.errors);
+            }
         }
-        const FileOperationResult result = fileEngine_.restorePersonalFolder(folder.key);
-        if (result.errors.isEmpty()) {
-            ++success;
-        } else {
-            errors.append(result.errors);
-        }
-    }
-    refreshMigrationFolders();
-    showOperationLog(QStringLiteral("还原所有迁移目录 %1 项，失败 %2 项").arg(success).arg(errors.size()));
-    QMessageBox::information(this, QStringLiteral("还原所有迁移目录"), QStringLiteral("成功 %1 项，失败 %2 项。\n%3").arg(success).arg(errors.size()).arg(errors.join(QStringLiteral("\n"))));
+        return combined;
+    }, [this] { refreshMigrationFolders(); });
 }
 
 void MainWindow::populateRepairTable(bool deep) {
@@ -2091,7 +2290,7 @@ void MainWindow::populateRepairTable(bool deep) {
         auto* run = secondaryButton(QStringLiteral("执行"));
         connect(run, &QPushButton::clicked, this, [this, item] { runRepairCommand(item); });
         repairTable_->setCellWidget(row, 5, run);
-        setTableRowMetadata(repairTable_, row, item.description, item.risk, {}, item.command);
+        setTableRowMetadata(repairTable_, row, item.description, item.risk, {}, item.command, QStringLiteral("repair:%1").arg(item.id));
         if (item.deep) {
             for (int column = 0; column < 5; ++column) {
                 repairTable_->item(row, column)->setBackground(QBrush(QColor(QStringLiteral("#fff3cd"))));
@@ -2191,8 +2390,6 @@ void MainWindow::runGlobalRestore() {
         )) {
         return;
     }
-    QStringList output;
-    QSet<QString> restoredActions;
     const QSet<QString> appliedOptimizations = appliedActionIds(OptimizationStateKey);
     const QSet<QString> appliedGpuActions = appliedActionIds(GpuStateKey);
     const QVector<QVector<WindowsOptimizationAction>> groups = {
@@ -2200,50 +2397,82 @@ void MainWindow::runGlobalRestore() {
         SystemCatalog::gamingOptimizationActions(),
         SystemCatalog::advancedControlActions(),
     };
-    for (const QVector<WindowsOptimizationAction>& actions : groups) {
-        for (const WindowsOptimizationAction& action : actions) {
-            if (action.revertCommands.isEmpty()
-                || restoredActions.contains(action.id)
-                || !appliedOptimizations.contains(action.id)) {
+    const QVector<GpuOptimizationAction> gpuActions = gpuActions_;
+    const QString backupRoot = backupRoot_;
+    globalStatusLabel_->setText(QStringLiteral("正在执行全局还原..."));
+    auto* watcher = new QFutureWatcher<GlobalRestoreResult>(this);
+    connect(watcher, &QFutureWatcher<GlobalRestoreResult>::finished, this, [this, watcher] {
+        const GlobalRestoreResult result = watcher->result();
+        for (const QString& id : result.restoredOptimizationIds) {
+            setActionApplied(OptimizationStateKey, id, false);
+        }
+        for (const QString& id : result.restoredGpuIds) {
+            setActionApplied(GpuStateKey, id, false);
+        }
+        refreshMigrationFolders();
+        showOperationLog(QStringLiteral("全局一键还原完成"));
+        QMessageBox::information(this, QStringLiteral("全局一键还原"), result.output.join(QStringLiteral("\n\n")).left(16000));
+        watcher->deleteLater();
+    });
+    watcher->setFuture(QtConcurrent::run([groups, gpuActions, appliedOptimizations, appliedGpuActions, backupRoot] {
+        GlobalRestoreResult restored;
+        QSet<QString> handledActions;
+        for (const QVector<WindowsOptimizationAction>& actions : groups) {
+            for (const WindowsOptimizationAction& action : actions) {
+                if (action.revertCommands.isEmpty()
+                    || handledActions.contains(action.id)
+                    || !appliedOptimizations.contains(action.id)) {
+                    continue;
+                }
+                handledActions.insert(action.id);
+                int exitCode = 0;
+                restored.output.push_back(QStringLiteral("[%1]\n%2")
+                    .arg(action.title, SystemCatalog::runOptimizationAction(action, true, &exitCode)));
+                if (exitCode == 0) {
+                    restored.restoredOptimizationIds.push_back(action.id);
+                }
+            }
+        }
+        GpuOptimizationEngine gpuEngine;
+        for (const GpuOptimizationAction& action : gpuActions) {
+            if (action.revertCommands.isEmpty() || !appliedGpuActions.contains(action.id)) {
                 continue;
             }
-            restoredActions.insert(action.id);
             int exitCode = 0;
-            output.push_back(QStringLiteral("[%1]\n%2").arg(action.title, SystemCatalog::runActionCommands(action.revertCommands, &exitCode)));
+            restored.output.push_back(QStringLiteral("[%1]\n%2")
+                .arg(action.title, gpuEngine.restoreAction(action, &exitCode)));
             if (exitCode == 0) {
-                setActionApplied(OptimizationStateKey, action.id, false);
+                restored.restoredGpuIds.push_back(action.id);
             }
         }
-    }
-    for (const GpuOptimizationAction& action : gpuActions_) {
-        if (action.revertCommands.isEmpty() || !appliedGpuActions.contains(action.id)) {
-            continue;
+        FileManagementEngine fileEngine;
+        for (const MigrationFolder& folder : fileEngine.scanMigrationFolders()) {
+            if (folder.migrated) {
+                const FileOperationResult operation = fileEngine.restorePersonalFolder(folder.key);
+                restored.output.push_back(QStringLiteral("[目录还原] %1: %2")
+                    .arg(folder.name, operation.errors.isEmpty() ? QStringLiteral("成功") : operation.errors.join(QStringLiteral("; "))));
+            }
         }
-        int exitCode = 0;
-        output.push_back(QStringLiteral("[%1]\n%2").arg(action.title, gpuEngine_.restoreAction(action, &exitCode)));
-        if (exitCode == 0) {
-            setActionApplied(GpuStateKey, action.id, false);
+        int backupRestored = 0;
+        QStringList backupErrors;
+        QSet<QString> handledSources;
+        for (const BackupRecord& record : CleanupEngine::backupInfo(backupRoot).backups) {
+            const QString source = QDir::cleanPath(record.sourcePath).toLower();
+            if (handledSources.contains(source)) {
+                continue;
+            }
+            handledSources.insert(source);
+            QString error;
+            if (CleanupEngine::restoreBackupItem(record, &error)) {
+                ++backupRestored;
+            } else {
+                backupErrors.push_back(error);
+            }
         }
-    }
-    for (const MigrationFolder& folder : fileEngine_.scanMigrationFolders()) {
-        if (folder.migrated) {
-            const FileOperationResult result = fileEngine_.restorePersonalFolder(folder.key);
-            output.push_back(QStringLiteral("[目录还原] %1: %2").arg(folder.name, result.errors.isEmpty() ? QStringLiteral("成功") : result.errors.join(QStringLiteral("; "))));
-        }
-    }
-    int backupRestored = 0;
-    QStringList backupErrors;
-    for (const BackupRecord& record : CleanupEngine::backupInfo(backupRoot_).backups) {
-        QString error;
-        if (CleanupEngine::restoreBackupItem(record, &error)) {
-            ++backupRestored;
-        } else {
-            backupErrors.push_back(error);
-        }
-    }
-    output.push_back(QStringLiteral("[清理备份] 恢复 %1 个，失败 %2 个").arg(backupRestored).arg(backupErrors.size()));
-    output.append(backupErrors);
-    refreshMigrationFolders();
-    showOperationLog(QStringLiteral("全局一键还原完成"));
-    QMessageBox::information(this, QStringLiteral("全局一键还原"), output.join(QStringLiteral("\n\n")).left(16000));
+        restored.output.push_back(QStringLiteral("[清理备份] 恢复 %1 个，失败 %2 个")
+            .arg(backupRestored)
+            .arg(backupErrors.size()));
+        restored.output.append(backupErrors);
+        return restored;
+    }));
 }

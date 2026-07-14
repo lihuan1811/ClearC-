@@ -42,6 +42,40 @@ bool removePath(const QString& path) {
         : QFile::remove(path);
 }
 
+bool isProtectedResidualPath(const QString& path);
+
+qint64 directorySize(const QString& path) {
+    qint64 total = 0;
+    QDirIterator iterator(path, QDir::Files | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
+    while (iterator.hasNext()) {
+        iterator.next();
+        total += iterator.fileInfo().size();
+    }
+    return total;
+}
+
+void fillMissingInstallDetails(InstalledApplication* app) {
+    if (!app || app->installLocation.trimmed().isEmpty()) {
+        return;
+    }
+    const QFileInfo location(app->installLocation);
+    if (!location.exists()) {
+        return;
+    }
+    if (app->sizeBytes <= 0 && location.isDir() && !isProtectedResidualPath(location.absoluteFilePath())) {
+        app->sizeBytes = directorySize(location.absoluteFilePath());
+    }
+    if (app->installDate.isEmpty()) {
+        QDateTime timestamp = location.birthTime();
+        if (!timestamp.isValid()) {
+            timestamp = location.lastModified();
+        }
+        if (timestamp.isValid()) {
+            app->installDate = timestamp.toString(QStringLiteral("yyyyMMdd"));
+        }
+    }
+}
+
 bool registryKeyExists(const QString& key) {
 #ifdef Q_OS_WIN
     if (key.isEmpty()) {
@@ -109,6 +143,7 @@ QVector<InstalledApplication> SoftwareUninstallEngine::installedApplications() c
                 }
                 app.registryKey = root + QLatin1Char('\\') + group;
                 app.sizeBytes = settings.value(QStringLiteral("EstimatedSize")).toLongLong() * 1024;
+                fillMissingInstallDetails(&app);
                 applications.push_back(app);
             }
             settings.endGroup();
@@ -148,6 +183,7 @@ QVector<InstalledApplication> SoftwareUninstallEngine::installedApplications() c
             escaped.replace(QLatin1Char('\''), QStringLiteral("''"));
             app.uninstallCommand = QStringLiteral("powershell -NoProfile -Command \"Get-AppxPackage -PackageFullName '%1' | Remove-AppxPackage\"").arg(escaped);
             app.storeApp = true;
+            fillMissingInstallDetails(&app);
             applications.push_back(app);
         }
     }
@@ -205,7 +241,35 @@ UninstallResult SoftwareUninstallEngine::startUninstall(const InstalledApplicati
         return result;
     }
 #ifdef Q_OS_WIN
-    result.started = QProcess::startDetached(QStringLiteral("cmd.exe"), {QStringLiteral("/C"), app.uninstallCommand});
+    QString uninstallCommand = app.uninstallCommand.trimmed();
+    static const QRegularExpression msiInstallPattern(
+        QStringLiteral("(^|\\s)/I(?=\\s*\\{)"),
+        QRegularExpression::CaseInsensitiveOption
+    );
+    uninstallCommand.replace(msiInstallPattern, QStringLiteral("\\1/X"));
+
+    QProcess process;
+    process.start(
+        QStringLiteral("cmd.exe"),
+        {
+            QStringLiteral("/D"),
+            QStringLiteral("/S"),
+            QStringLiteral("/C"),
+            QStringLiteral("start \"\" /wait %1").arg(uninstallCommand),
+        }
+    );
+    result.started = process.waitForStarted(10000);
+    if (result.started) {
+        process.waitForFinished(-1);
+        result.completed = process.state() == QProcess::NotRunning;
+        result.exitCode = process.exitCode();
+        const QString processError = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
+        if (result.exitCode != 0) {
+            result.errors.push_back(processError.isEmpty()
+                ? QStringLiteral("卸载程序退出码 %1: %2").arg(result.exitCode).arg(app.name)
+                : processError);
+        }
+    }
 #else
     result.started = false;
 #endif

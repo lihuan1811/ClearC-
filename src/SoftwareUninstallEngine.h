@@ -19,6 +19,8 @@ struct InstalledApplication {
 
 struct UninstallResult {
     bool started = false;
+    bool completed = false;
+    int exitCode = -1;
     QString registryBackup;
     QStringList removedPaths;
     QStringList errors;

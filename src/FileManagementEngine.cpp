@@ -7,15 +7,20 @@
 #include <QFileInfo>
 #include <QMap>
 #include <QProcess>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStorageInfo>
+#include <QSet>
+#include <QUuid>
 
 #include <algorithm>
 #include <filesystem>
+#include <queue>
 #include <string>
 #include <system_error>
+#include <vector>
 
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
@@ -90,6 +95,11 @@ bool directoryHasEntries(const QString& path) {
     ).isEmpty();
 }
 
+QString powerShellSingleQuoted(QString value) {
+    value.replace(QLatin1Char('\''), QStringLiteral("''"));
+    return QStringLiteral("'%1'").arg(value);
+}
+
 #ifdef Q_OS_WIN
 QString windowsErrorMessage(const QString& action, DWORD code) {
     return QStringLiteral("%1失败，Windows 错误码: %2").arg(action).arg(code);
@@ -104,8 +114,14 @@ QVector<ManagedFileEntry> FileManagementEngine::listFiles(const QString& rootPat
         return files;
     }
 
+    struct SmallestManagedFileFirst {
+        bool operator()(const ManagedFileEntry& left, const ManagedFileEntry& right) const {
+            return left.sizeBytes > right.sizeBytes;
+        }
+    };
+    std::priority_queue<ManagedFileEntry, std::vector<ManagedFileEntry>, SmallestManagedFileFirst> largestFiles;
     QDirIterator iterator(rootPath, QDir::Files | QDir::Hidden | QDir::System | QDir::NoSymLinks, QDirIterator::Subdirectories);
-    while (iterator.hasNext() && files.size() < limit) {
+    while (iterator.hasNext()) {
         const QString path = iterator.next();
         const ManagedFileType detected = detectType(path);
         if (type != ManagedFileType::All && detected != type) {
@@ -117,7 +133,18 @@ QVector<ManagedFileEntry> FileManagementEngine::listFiles(const QString& rootPat
         entry.name = info.fileName();
         entry.sizeBytes = info.size();
         entry.type = detected;
-        files.push_back(entry);
+        if (limit <= 0) {
+            files.push_back(entry);
+        } else if (static_cast<int>(largestFiles.size()) < limit) {
+            largestFiles.push(entry);
+        } else if (entry.sizeBytes > largestFiles.top().sizeBytes) {
+            largestFiles.pop();
+            largestFiles.push(entry);
+        }
+    }
+    while (!largestFiles.empty()) {
+        files.push_back(largestFiles.top());
+        largestFiles.pop();
     }
 
     std::sort(files.begin(), files.end(), [](const ManagedFileEntry& a, const ManagedFileEntry& b) {
@@ -143,6 +170,12 @@ FolderUsageScan FileManagementEngine::scanFolderUsageDetailed(const QString& roo
     QMap<QString, ExtensionUsageEntry> extensionUsage;
     QVector<QString> pending = {rootAbsolutePath};
     const bool collectFileDetails = fileLimit != 0;
+    struct SmallestFileFirst {
+        bool operator()(const FileUsageEntry& left, const FileUsageEntry& right) const {
+            return left.sizeBytes > right.sizeBytes;
+        }
+    };
+    std::priority_queue<FileUsageEntry, std::vector<FileUsageEntry>, SmallestFileFirst> largestFiles;
 
     while (!pending.isEmpty()) {
         const QString current = pending.takeLast();
@@ -199,7 +232,14 @@ FolderUsageScan FileManagementEngine::scanFolderUsageDetailed(const QString& roo
             fileEntry.extension = extension;
             fileEntry.sizeBytes = sizeBytes;
             fileEntry.fileCount = 1;
-            scan.files.push_back(fileEntry);
+            if (fileLimit < 0) {
+                scan.files.push_back(fileEntry);
+            } else if (static_cast<int>(largestFiles.size()) < fileLimit) {
+                largestFiles.push(fileEntry);
+            } else if (fileEntry.sizeBytes > largestFiles.top().sizeBytes) {
+                largestFiles.pop();
+                largestFiles.push(fileEntry);
+            }
         }
     }
 
@@ -214,6 +254,10 @@ FolderUsageScan FileManagementEngine::scanFolderUsageDetailed(const QString& roo
     }
 
     if (collectFileDetails) {
+        while (!largestFiles.empty()) {
+            scan.files.push_back(largestFiles.top());
+            largestFiles.pop();
+        }
         for (auto it = extensionUsage.cbegin(); it != extensionUsage.cend(); ++it) {
             scan.extensions.push_back(it.value());
         }
@@ -224,9 +268,6 @@ FolderUsageScan FileManagementEngine::scanFolderUsageDetailed(const QString& roo
         std::sort(scan.files.begin(), scan.files.end(), [](const FileUsageEntry& a, const FileUsageEntry& b) {
             return a.sizeBytes > b.sizeBytes;
         });
-        if (fileLimit > 0 && scan.files.size() > fileLimit) {
-            scan.files.resize(fileLimit);
-        }
     }
 
     return scan;
@@ -256,6 +297,81 @@ FileOperationResult FileManagementEngine::renameFile(const QString& path, const 
     return result;
 }
 
+FileOperationResult FileManagementEngine::renameFiles(const QStringList& paths, const QString& prefix) const {
+    FileOperationResult result;
+    QString cleanPrefix = prefix.trimmed();
+    cleanPrefix.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]+")), QStringLiteral("_"));
+    if (paths.isEmpty() || cleanPrefix.isEmpty()) {
+        result.errors.push_back(QStringLiteral("请选择文件并输入有效的批量重命名前缀。"));
+        return result;
+    }
+
+    struct RenamePlan {
+        QString source;
+        QString temporary;
+        QString target;
+    };
+    QVector<RenamePlan> plans;
+    QSet<QString> targets;
+    const QString operationId = QUuid::createUuid().toString(QUuid::Id128);
+    for (int index = 0; index < paths.size(); ++index) {
+        const QFileInfo info(paths.at(index));
+        if (!info.exists() || !info.isFile()) {
+            result.errors.push_back(QStringLiteral("只能批量重命名现有文件: %1").arg(paths.at(index)));
+            return result;
+        }
+        const QString extension = info.suffix().isEmpty() ? QString() : QStringLiteral(".%1").arg(info.suffix());
+        const QString target = QDir(info.absolutePath()).filePath(
+            QStringLiteral("%1_%2%3").arg(cleanPrefix).arg(index + 1, 3, 10, QLatin1Char('0')).arg(extension)
+        );
+        const QString normalizedTarget = QDir::cleanPath(target).toLower();
+        if (targets.contains(normalizedTarget)
+            || (QFileInfo::exists(target) && QFileInfo(target).absoluteFilePath().compare(info.absoluteFilePath(), Qt::CaseInsensitive) != 0)) {
+            result.errors.push_back(QStringLiteral("目标文件已存在，未执行批量重命名: %1").arg(target));
+            return result;
+        }
+        targets.insert(normalizedTarget);
+        plans.push_back({
+            info.absoluteFilePath(),
+            QDir(info.absolutePath()).filePath(QStringLiteral(".c_diskglow_rename_%1_%2.tmp").arg(operationId).arg(index)),
+            target,
+        });
+    }
+
+    int staged = 0;
+    for (; staged < plans.size(); ++staged) {
+        if (!QFile::rename(plans.at(staged).source, plans.at(staged).temporary)) {
+            result.errors.push_back(QStringLiteral("暂存重命名失败: %1").arg(plans.at(staged).source));
+            break;
+        }
+    }
+    if (staged != plans.size()) {
+        for (int index = staged - 1; index >= 0; --index) {
+            QFile::rename(plans.at(index).temporary, plans.at(index).source);
+        }
+        return result;
+    }
+
+    int completed = 0;
+    for (; completed < plans.size(); ++completed) {
+        if (!QFile::rename(plans.at(completed).temporary, plans.at(completed).target)) {
+            result.errors.push_back(QStringLiteral("批量重命名失败: %1").arg(plans.at(completed).target));
+            break;
+        }
+        result.affectedPaths.push_back(plans.at(completed).target);
+    }
+    if (completed != plans.size()) {
+        for (int index = completed - 1; index >= 0; --index) {
+            QFile::rename(plans.at(index).target, plans.at(index).source);
+        }
+        for (int index = completed; index < plans.size(); ++index) {
+            QFile::rename(plans.at(index).temporary, plans.at(index).source);
+        }
+        result.affectedPaths.clear();
+    }
+    return result;
+}
+
 FileOperationResult FileManagementEngine::deleteFiles(const QStringList& paths) const {
     FileOperationResult result;
     for (const QString& path : paths) {
@@ -280,27 +396,47 @@ FileOperationResult FileManagementEngine::deleteFiles(const QStringList& paths) 
 
 FileOperationResult FileManagementEngine::shredFiles(const QStringList& paths) const {
     FileOperationResult result;
-    const QByteArray zeros(8192, '\0');
     for (const QString& path : paths) {
-        QFile file(path);
-        if (!file.exists()) {
+        const QFileInfo info(path);
+        if (!info.exists() || !info.isFile()) {
+            result.errors.push_back(QStringLiteral("只能粉碎现有文件: %1").arg(path));
             continue;
         }
-        const qint64 length = QFileInfo(path).size();
-        if (!file.open(QIODevice::WriteOnly)) {
+        QFile file(path);
+        const qint64 length = info.size();
+        if (!file.open(QIODevice::ReadWrite)) {
             result.errors.push_back(QStringLiteral("无法打开文件粉碎: %1").arg(path));
             continue;
         }
-        qint64 written = 0;
-        while (written < length) {
-            const qint64 count = qMin<qint64>(zeros.size(), length - written);
-            if (file.write(zeros.constData(), count) != count) {
+        bool overwritten = true;
+        for (int pass = 0; pass < 2 && overwritten; ++pass) {
+            if (!file.seek(0)) {
+                overwritten = false;
                 break;
             }
-            written += count;
+            qint64 written = 0;
+            QByteArray block(8192, '\0');
+            while (written < length) {
+                const qint64 count = qMin<qint64>(block.size(), length - written);
+                if (pass == 0) {
+                    for (qint64 index = 0; index < count; ++index) {
+                        block[static_cast<int>(index)] = static_cast<char>(QRandomGenerator::global()->generate() & 0xff);
+                    }
+                } else {
+                    block.fill('\0');
+                }
+                if (file.write(block.constData(), count) != count) {
+                    overwritten = false;
+                    break;
+                }
+                written += count;
+            }
+            overwritten = overwritten && file.flush();
         }
         file.close();
-        if (QFile::remove(path)) {
+        if (!overwritten) {
+            result.errors.push_back(QStringLiteral("文件未完整覆写，已保留原文件: %1").arg(path));
+        } else if (QFile::remove(path)) {
             result.affectedPaths.push_back(path);
         } else {
             result.errors.push_back(QStringLiteral("粉碎后删除失败: %1").arg(path));
@@ -309,10 +445,53 @@ FileOperationResult FileManagementEngine::shredFiles(const QStringList& paths) c
     return result;
 }
 
+FileOperationResult FileManagementEngine::migrateFilesWithShortcuts(const QStringList& paths, const QString& targetDirectory) const {
+    FileOperationResult result;
+    if (!QDir().mkpath(targetDirectory)) {
+        result.errors.push_back(QStringLiteral("创建迁移目标失败: %1").arg(targetDirectory));
+        return result;
+    }
+    for (const QString& source : paths) {
+        const QFileInfo sourceInfo(source);
+        if (!sourceInfo.exists() || !sourceInfo.isFile()) {
+            result.errors.push_back(QStringLiteral("迁移源文件不存在: %1").arg(source));
+            continue;
+        }
+        const QString destination = QDir(targetDirectory).filePath(sourceInfo.fileName());
+        const QString shortcutPath = sourceInfo.absoluteFilePath() + QStringLiteral(".lnk");
+        if (QFileInfo::exists(destination) || QFileInfo::exists(shortcutPath)) {
+            result.errors.push_back(QStringLiteral("目标文件或原位快捷方式已存在，已跳过: %1").arg(source));
+            continue;
+        }
+
+        FileOperationResult moved = moveFiles({sourceInfo.absoluteFilePath()}, targetDirectory);
+        if (!moved.errors.isEmpty() || !QFileInfo::exists(destination)) {
+            result.errors.append(moved.errors);
+            if (moved.errors.isEmpty()) {
+                result.errors.push_back(QStringLiteral("迁移后未找到目标文件: %1").arg(destination));
+            }
+            continue;
+        }
+        FileOperationResult shortcut = createShortcut(destination, shortcutPath);
+        if (!shortcut.errors.isEmpty() || !QFileInfo::exists(shortcutPath)) {
+            result.errors.append(shortcut.errors);
+            FileOperationResult rollback = moveFiles({destination}, sourceInfo.absolutePath());
+            if (!rollback.errors.isEmpty()) {
+                result.errors.push_back(QStringLiteral("快捷方式创建失败且文件回滚失败: %1").arg(source));
+                result.errors.append(rollback.errors);
+            }
+            continue;
+        }
+        result.affectedPaths.push_back(destination);
+        result.affectedPaths.push_back(shortcutPath);
+    }
+    return result;
+}
+
 FileOperationResult FileManagementEngine::createShortcut(const QString& target, const QString& shortcutPath) const {
 #ifdef Q_OS_WIN
-    const QString script = QStringLiteral("$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut('%1'); $l.TargetPath='%2'; $l.Save()")
-        .arg(shortcutPath, target);
+    const QString script = QStringLiteral("$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut(%1); $l.TargetPath=%2; $l.Save()")
+        .arg(powerShellSingleQuoted(shortcutPath), powerShellSingleQuoted(target));
     return runCommand(QStringLiteral("powershell"), {QStringLiteral("-NoProfile"), QStringLiteral("-Command"), script});
 #else
     Q_UNUSED(target);
@@ -333,14 +512,21 @@ FileOperationResult FileManagementEngine::repairFolderPermission(const QString& 
 QVector<MigrationFolder> FileManagementEngine::migrationCatalog() const {
     const QString home = homePath();
     const QString local = envPath(QStringLiteral("LOCALAPPDATA"), joinPath(home, {QStringLiteral("AppData"), QStringLiteral("Local")}));
+    const QString roaming = envPath(QStringLiteral("APPDATA"), joinPath(home, {QStringLiteral("AppData"), QStringLiteral("Roaming")}));
+    const QString documents = joinPath(home, {QStringLiteral("Documents")});
+    const QString systemRoot = envPath(QStringLiteral("SystemRoot"), QStringLiteral("C:\\Windows"));
     return {
         {QStringLiteral("desktop"), QStringLiteral("桌面"), QStringLiteral("Desktop"), joinPath(home, {QStringLiteral("Desktop")})},
-        {QStringLiteral("documents"), QStringLiteral("我的文档"), QStringLiteral("Documents"), joinPath(home, {QStringLiteral("Documents")})},
+        {QStringLiteral("documents"), QStringLiteral("我的文档"), QStringLiteral("Documents"), documents},
         {QStringLiteral("downloads"), QStringLiteral("下载"), QStringLiteral("Downloads"), joinPath(home, {QStringLiteral("Downloads")})},
         {QStringLiteral("videos"), QStringLiteral("我的视频"), QStringLiteral("Videos"), joinPath(home, {QStringLiteral("Videos")})},
         {QStringLiteral("pictures"), QStringLiteral("我的图片"), QStringLiteral("Pictures"), joinPath(home, {QStringLiteral("Pictures")})},
-        {QStringLiteral("appdata_cache"), QStringLiteral("AppData 软件缓存（微信/QQ）"), QStringLiteral("AppData-Tencent"), joinPath(local, {QStringLiteral("Tencent")})},
-        {QStringLiteral("temp"), QStringLiteral("Temp 系统临时文件夹"), QStringLiteral("Temp"), joinPath(local, {QStringLiteral("Temp")})},
+        {QStringLiteral("appdata_cache"), QStringLiteral("AppData 本地软件缓存（微信/QQ）"), QStringLiteral("AppData-Local-Tencent"), joinPath(local, {QStringLiteral("Tencent")})},
+        {QStringLiteral("appdata_roaming_cache"), QStringLiteral("AppData 漫游软件缓存（微信/QQ）"), QStringLiteral("AppData-Roaming-Tencent"), joinPath(roaming, {QStringLiteral("Tencent")})},
+        {QStringLiteral("wechat_data"), QStringLiteral("微信数据目录"), QStringLiteral("WeChat-Files"), joinPath(documents, {QStringLiteral("WeChat Files")})},
+        {QStringLiteral("qq_data"), QStringLiteral("QQ 数据目录"), QStringLiteral("Tencent-Files"), joinPath(documents, {QStringLiteral("Tencent Files")})},
+        {QStringLiteral("temp"), QStringLiteral("当前用户 Temp 临时文件夹"), QStringLiteral("User-Temp"), joinPath(local, {QStringLiteral("Temp")})},
+        {QStringLiteral("system_temp"), QStringLiteral("Windows 系统 Temp 临时文件夹"), QStringLiteral("System-Temp"), joinPath(systemRoot, {QStringLiteral("Temp")})},
     };
 }
 
@@ -459,23 +645,52 @@ FileOperationResult FileManagementEngine::restorePersonalFolder(const QString& f
         result.errors.push_back(QStringLiteral("无法读取迁移目标: %1").arg(folder.path));
         return result;
     }
-    if (!updateMigrationRedirect(folder, folder.path, &result)) {
-        return result;
-    }
     if (!removeJunction(folder.path, &result)) {
         return result;
     }
     if (!QDir().mkpath(folder.path)) {
         result.errors.push_back(QStringLiteral("创建还原目录失败: %1").arg(folder.path));
+        FileOperationResult junction = createJunction(folder.path, target);
+        result.errors.append(junction.errors);
         return result;
     }
     if (!target.isEmpty() && QFileInfo::exists(target) && QFileInfo(target).absoluteFilePath() != QFileInfo(folder.path).absoluteFilePath()) {
         if (!mergeMoveDirectoryContents(target, folder.path, folder.name, &result)) {
+            FileOperationResult rollback;
+            mergeMoveDirectoryContents(folder.path, target, folder.name, &rollback);
+            removeEmptyDirectory(folder.path, &rollback);
+            const FileOperationResult junction = createJunction(folder.path, target);
+            rollback.errors.append(junction.errors);
+            updateMigrationRedirect(folder, target, &rollback);
+            result.errors.push_back(QStringLiteral("还原失败，已尝试恢复原迁移状态。"));
+            result.errors.append(rollback.errors);
             return result;
         }
-        if (!removeEmptyDirectory(target, &result)) {
+        if (directoryHasEntries(target)) {
+            FileOperationResult rollback;
+            mergeMoveDirectoryContents(folder.path, target, folder.name, &rollback);
+            removeEmptyDirectory(folder.path, &rollback);
+            const FileOperationResult junction = createJunction(folder.path, target);
+            rollback.errors.append(junction.errors);
+            updateMigrationRedirect(folder, target, &rollback);
+            result.errors.push_back(QStringLiteral("目标目录在还原期间产生了新文件，已停止并尝试恢复原迁移状态。"));
+            result.errors.append(rollback.errors);
             return result;
         }
+    }
+    if (!updateMigrationRedirect(folder, folder.path, &result)) {
+        FileOperationResult rollback;
+        mergeMoveDirectoryContents(folder.path, target, folder.name, &rollback);
+        removeEmptyDirectory(folder.path, &rollback);
+        const FileOperationResult junction = createJunction(folder.path, target);
+        rollback.errors.append(junction.errors);
+        updateMigrationRedirect(folder, target, &rollback);
+        result.errors.push_back(QStringLiteral("系统路径更新失败，已尝试恢复原迁移状态。"));
+        result.errors.append(rollback.errors);
+        return result;
+    }
+    if (!target.isEmpty() && QFileInfo::exists(target) && !QDir().rmdir(target)) {
+        result.errors.push_back(QStringLiteral("目标空目录无法删除，可稍后手动删除: %1").arg(target));
     }
     result.affectedPaths.push_back(folder.path);
     return result;
@@ -889,9 +1104,12 @@ bool FileManagementEngine::updateMigrationRedirect(
     FileOperationResult* result
 ) const {
 #ifdef Q_OS_WIN
-    if (folder.key == QStringLiteral("temp")) {
+    if (folder.key == QStringLiteral("temp") || folder.key == QStringLiteral("system_temp")) {
+        const QString registryPath = folder.key == QStringLiteral("system_temp")
+            ? QStringLiteral("HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment")
+            : QStringLiteral("HKEY_CURRENT_USER\\Environment");
         QSettings environment(
-            QStringLiteral("HKEY_CURRENT_USER\\Environment"),
+            registryPath,
             QSettings::NativeFormat
         );
         environment.setValue(QStringLiteral("TEMP"), QDir::toNativeSeparators(path));

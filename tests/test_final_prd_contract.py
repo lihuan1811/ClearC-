@@ -99,6 +99,9 @@ def test_uninstall_supports_registry_uwp_search_sort_backup_batch_and_residuals(
     ]:
         assert token in window
     assert "SoftwareUninstallEngine.cpp" in cmake
+    assert "startDetached" not in engine
+    assert "singleShot(1000" not in window
+    assert "waitForFinished(-1)" in engine
 
 
 def test_system_optimization_contains_only_the_four_final_prd_sections():
@@ -133,13 +136,17 @@ def test_system_optimization_contains_only_the_four_final_prd_sections():
     for token in [
         "NVIDIA 一键调优",
         "AMD 一键调优",
-        "恢复显卡默认设置",
         "nvidia-smi",
         "NVAPI",
         "ADLX",
         "setTabVisible",
     ]:
         assert token in gpu + window
+    assert "NvidiaNvapiBridge" in gpu
+    assert "AmdAdlxBridge" in gpu
+    assert "Get-WmiObject Win32_VideoController" in gpu
+    assert "Get-CimInstance Win32_VideoController" not in gpu
+    assert "NV_Cache" not in gpu
 
 
 def test_file_manager_has_disk_switch_filters_operations_visualization_and_only_prd_migrations():
@@ -231,6 +238,8 @@ def test_repair_global_navigation_logging_tooltips_and_admin_flow_are_present():
     for token in ["runas", "CheckTokenMembership", "管理员权限受限", "isElevated"]:
         assert token in main
     assert "RequestExecutionLevel admin" in workflow
+    assert "ContextActionRole" in window
+    assert "runContextAction" in window
 
 
 def test_removed_features_are_absent_from_the_compiled_cpp_product():
@@ -276,3 +285,5 @@ def test_windows_release_builds_qt5_x86_and_x64_packages():
         "CDriveCleanerQt-x86-Portable.exe",
     ]:
         assert token in workflow
+    assert "ctest --test-dir build" in workflow
+    assert "CDriveCleanerEngineTests" in cmake
