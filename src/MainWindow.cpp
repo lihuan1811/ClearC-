@@ -15,6 +15,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFont>
 #include <QFrame>
 #include <QGraphicsScene>
 #include <QGraphicsTextItem>
@@ -51,6 +52,13 @@ constexpr int PathRole = Qt::UserRole + 10;
 constexpr int CommandRole = Qt::UserRole + 11;
 constexpr int AppIndexRole = Qt::UserRole + 12;
 constexpr int ContextActionRole = Qt::UserRole + 13;
+constexpr int CleanupRuleIdRole = Qt::UserRole + 20;
+constexpr int CleanupDescriptionRole = Qt::UserRole + 21;
+constexpr int CleanupPathsRole = Qt::UserRole + 22;
+constexpr int CleanupRiskRole = Qt::UserRole + 23;
+constexpr int CleanupScanOnlyRole = Qt::UserRole + 24;
+constexpr int CleanupSizeRole = Qt::UserRole + 25;
+constexpr int CleanupFileCountRole = Qt::UserRole + 26;
 const QString OptimizationStateKey = QStringLiteral("state/applied_optimizations");
 const QString GpuStateKey = QStringLiteral("state/applied_gpu_actions");
 
@@ -372,16 +380,16 @@ QWidget* MainWindow::scrollablePage(QWidget* page) {
 QWidget* MainWindow::createCleanPage() {
     auto* page = new QWidget(this);
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(20, 18, 20, 18);
-    layout->setSpacing(12);
+    layout->setContentsMargins(16, 12, 16, 12);
+    layout->setSpacing(8);
 
     auto* header = new QFrame(page);
     header->setObjectName(QStringLiteral("heroPanel"));
     auto* headerLayout = new QHBoxLayout(header);
-    headerLayout->setContentsMargins(16, 14, 16, 14);
+    headerLayout->setContentsMargins(14, 10, 14, 10);
     headerLayout->addWidget(pageHeader(
-        QStringLiteral("C 盘深度清理"),
-        QStringLiteral("扫描系统临时文件、更新缓存、日志、DUMP、缩略图、回收站、浏览器缓存和冗余安装包。")
+        QStringLiteral("C 盘空间清理"),
+        QStringLiteral("按规则扫描系统、缓存、应用和临时文件；每项可独立选择并查看路径与风险说明。")
     ), 2);
 
     auto* stats = new QHBoxLayout();
@@ -396,44 +404,106 @@ QWidget* MainWindow::createCleanPage() {
     headerLayout->addLayout(stats, 3);
     layout->addWidget(header);
 
-    auto* controls = new QHBoxLayout();
-    recommendedMode_ = new QCheckBox(QStringLiteral("推荐选项"), page);
-    deepMode_ = new QCheckBox(QStringLiteral("全选 / 深度"), page);
-    recommendedMode_->setChecked(true);
-    connect(recommendedMode_, &QCheckBox::clicked, this, [this] { updateCleanMode(false); });
-    connect(deepMode_, &QCheckBox::clicked, this, [this] { updateCleanMode(true); });
-    auto* scanButton = primaryButton(QStringLiteral("开始扫描"));
-    auto* backupButton = secondaryButton(QStringLiteral("备份与恢复"));
-    auto* cleanButton = primaryButton(QStringLiteral("清理选中"));
-    connect(scanButton, &QPushButton::clicked, this, &MainWindow::startScan);
-    connect(backupButton, &QPushButton::clicked, this, &MainWindow::openBackupManager);
-    connect(cleanButton, &QPushButton::clicked, this, &MainWindow::cleanSelected);
-    controls->addWidget(recommendedMode_);
-    controls->addWidget(deepMode_);
-    controls->addSpacing(12);
-    controls->addWidget(scanButton);
-    controls->addWidget(backupButton);
-    controls->addStretch();
-    controls->addWidget(cleanButton);
-    layout->addLayout(controls);
+    cleanupSelectionLabel_ = new QLabel(page);
+    cleanupSelectionLabel_->setObjectName(QStringLiteral("cleanupSelectionSummary"));
+    layout->addWidget(cleanupSelectionLabel_);
+
+    auto* workArea = new QSplitter(Qt::Horizontal, page);
+    workArea->setObjectName(QStringLiteral("cleanupWorkArea"));
+    workArea->setChildrenCollapsible(false);
+
+    cleanupTree_ = new QTreeWidget(workArea);
+    cleanupTree_->setObjectName(QStringLiteral("cleanupRuleTree"));
+    cleanupTree_->setColumnCount(5);
+    cleanupTree_->setHeaderLabels({QStringLiteral("清理项"), QStringLiteral("大小"), QStringLiteral("文件"), QStringLiteral("状态"), QStringLiteral("风险")});
+    cleanupTree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    for (int column = 1; column < cleanupTree_->columnCount(); ++column) {
+        cleanupTree_->header()->setSectionResizeMode(column, QHeaderView::ResizeToContents);
+    }
+    cleanupTree_->setRootIsDecorated(true);
+    cleanupTree_->setAlternatingRowColors(true);
+    cleanupTree_->setUniformRowHeights(true);
+    cleanupTree_->setMinimumHeight(330);
+    installTreeContextMenu(cleanupTree_, -1);
+    connect(cleanupTree_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* current, QTreeWidgetItem*) {
+        updateCleanupDetails(current);
+    });
+    connect(cleanupTree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem*, int column) {
+        if (column == 0) {
+            updateCleanupSelectionSummary();
+        }
+    });
+
+    auto* detailPanel = new QFrame(workArea);
+    detailPanel->setObjectName(QStringLiteral("cleanupDetailPanel"));
+    detailPanel->setMinimumWidth(250);
+    auto* detailLayout = new QVBoxLayout(detailPanel);
+    detailLayout->setContentsMargins(14, 14, 14, 14);
+    detailLayout->setSpacing(9);
+    auto* detailHeading = new QLabel(QStringLiteral("说明"), detailPanel);
+    detailHeading->setObjectName(QStringLiteral("cleanupDetailHeading"));
+    cleanupDescriptionTitle_ = new QLabel(QStringLiteral("选择左侧清理项"), detailPanel);
+    cleanupDescriptionTitle_->setObjectName(QStringLiteral("cleanupDetailTitle"));
+    cleanupDescriptionTitle_->setWordWrap(true);
+    cleanupDescriptionMeta_ = new QLabel(detailPanel);
+    cleanupDescriptionMeta_->setObjectName(QStringLiteral("cleanupDetailMeta"));
+    cleanupDescriptionMeta_->setWordWrap(true);
+    cleanupDescriptionText_ = new QLabel(QStringLiteral("这里会显示功能说明、风险等级和实际扫描路径。"), detailPanel);
+    cleanupDescriptionText_->setWordWrap(true);
+    cleanupDescriptionText_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    auto* pathHeading = new QLabel(QStringLiteral("扫描位置"), detailPanel);
+    pathHeading->setObjectName(QStringLiteral("cleanupPathHeading"));
+    cleanupDescriptionPaths_ = new QLabel(QStringLiteral("--"), detailPanel);
+    cleanupDescriptionPaths_->setObjectName(QStringLiteral("cleanupPathList"));
+    cleanupDescriptionPaths_->setWordWrap(true);
+    cleanupDescriptionPaths_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    detailLayout->addWidget(detailHeading);
+    detailLayout->addWidget(cleanupDescriptionTitle_);
+    detailLayout->addWidget(cleanupDescriptionMeta_);
+    detailLayout->addWidget(cleanupDescriptionText_);
+    detailLayout->addSpacing(6);
+    detailLayout->addWidget(pathHeading);
+    detailLayout->addWidget(cleanupDescriptionPaths_);
+    detailLayout->addStretch();
+    workArea->addWidget(cleanupTree_);
+    workArea->addWidget(detailPanel);
+    workArea->setStretchFactor(0, 4);
+    workArea->setStretchFactor(1, 2);
+    layout->addWidget(workArea, 1);
 
     currentScanPath_ = new QLabel(QStringLiteral("等待扫描。"), page);
+    currentScanPath_->setObjectName(QStringLiteral("cleanupScanPath"));
+    currentScanPath_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     scanProgress_ = new QProgressBar(page);
     scanProgress_->setRange(0, 100);
     scanProgress_->setValue(0);
+    scanProgress_->setTextVisible(false);
+    scanProgress_->setMaximumHeight(7);
     layout->addWidget(currentScanPath_);
     layout->addWidget(scanProgress_);
 
-    cleanupTree_ = new QTreeWidget(page);
-    cleanupTree_->setColumnCount(5);
-    cleanupTree_->setHeaderLabels({QStringLiteral("文件名 / 清理项"), QStringLiteral("占用大小"), QStringLiteral("风险"), QStringLiteral("状态"), QStringLiteral("完整存储路径")});
-    cleanupTree_->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    cleanupTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    cleanupTree_->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    cleanupTree_->header()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
-    cleanupTree_->header()->setSectionResizeMode(4, QHeaderView::Stretch);
-    installTreeContextMenu(cleanupTree_, 4);
-    layout->addWidget(cleanupTree_, 1);
+    auto* controls = new QHBoxLayout();
+    controls->setSpacing(8);
+    auto* clearSelectionButton = secondaryButton(QStringLiteral("全不选"));
+    auto* defaultSelectionButton = secondaryButton(QStringLiteral("默认"));
+    auto* refreshButton = secondaryButton(QStringLiteral("刷新"));
+    auto* backupButton = secondaryButton(QStringLiteral("备份与恢复"));
+    cleanupScanButton_ = primaryButton(QStringLiteral("扫描"));
+    cleanupCleanButton_ = primaryButton(QStringLiteral("清理"));
+    connect(clearSelectionButton, &QPushButton::clicked, this, [this] { setCleanupSelection(false); });
+    connect(defaultSelectionButton, &QPushButton::clicked, this, &MainWindow::restoreDefaultCleanupSelection);
+    connect(refreshButton, &QPushButton::clicked, this, &MainWindow::resetCleanupCatalog);
+    connect(cleanupScanButton_, &QPushButton::clicked, this, &MainWindow::startScan);
+    connect(backupButton, &QPushButton::clicked, this, &MainWindow::openBackupManager);
+    connect(cleanupCleanButton_, &QPushButton::clicked, this, &MainWindow::cleanSelected);
+    controls->addWidget(clearSelectionButton);
+    controls->addWidget(defaultSelectionButton);
+    controls->addWidget(refreshButton);
+    controls->addWidget(backupButton);
+    controls->addStretch();
+    controls->addWidget(cleanupScanButton_);
+    controls->addWidget(cleanupCleanButton_);
+    layout->addLayout(controls);
 
     cleanStatusLabel_ = new QLabel(QStringLiteral("准备扫描 C 盘可清理路径"), page);
     cleanStatusLabel_->setObjectName(QStringLiteral("statusStrip"));
@@ -455,11 +525,14 @@ QWidget* MainWindow::createCleanPage() {
         } else {
             QMessageBox::warning(this, QStringLiteral("清理完成"), message);
         }
+        cleanupScanButton_->setEnabled(true);
+        cleanupCleanButton_->setEnabled(true);
         refreshDiskInfo();
         reclaimSpaceLabel_->setText(QStringLiteral("实际释放 %1").arg(CleanupEngine::formatSize(qMax<qint64>(0, netChange))));
         cleanFreeBytesBefore_ = -1;
         startScan();
     });
+    populateCleanupTree();
     return page;
 }
 
@@ -858,6 +931,7 @@ void MainWindow::applyStyle() {
         QPushButton[nav="true"][active="true"] { background: rgba(255,255,255,0.22); }
         #primaryButton { background: #10a96f; color: white; font-weight: 600; }
         #secondaryButton { background: #e5f7ef; color: #06754f; font-weight: 600; }
+        #primaryButton:disabled, #secondaryButton:disabled { background: #e5e7eb; color: #8b949e; }
         #pageTitle { font-size: 23px; font-weight: 700; }
         #pageSubtitle { color: #526070; }
         #heroPanel, #statusStrip { background: white; border: 1px solid #d9e1dc; border-radius: 6px; }
@@ -866,6 +940,16 @@ void MainWindow::applyStyle() {
         #statPill { background: white; border: 1px solid #ccd7d0; border-radius: 6px; padding: 8px 10px; }
         #safeStatus { color: #06754f; font-weight: 600; }
         #warningStatus { color: #9a5b00; font-weight: 600; }
+        #cleanupSelectionSummary { color: #334155; font-weight: 600; padding: 2px 1px; }
+        #cleanupDetailPanel { background: white; border: 1px solid #cfd8d2; border-radius: 5px; }
+        #cleanupDetailHeading { color: #087a54; font-size: 14px; font-weight: 700; }
+        #cleanupDetailTitle { font-size: 17px; font-weight: 700; }
+        #cleanupDetailMeta { color: #526070; font-weight: 600; }
+        #cleanupPathHeading { color: #334155; font-weight: 700; }
+        #cleanupPathList, #cleanupScanPath { color: #526070; font-size: 12px; }
+        QTreeWidget#cleanupRuleTree::item { height: 25px; }
+        QTreeWidget#cleanupRuleTree::item:selected { background: #d9f4e8; color: #172033; }
+        QSplitter#cleanupWorkArea::handle { background: #e5ebe7; width: 5px; }
         QTreeWidget, QTableWidget, QTextEdit, QLineEdit, QComboBox {
             background: white; border: 1px solid #cfd8d2; border-radius: 5px; padding: 3px;
         }
@@ -1038,11 +1122,14 @@ void MainWindow::runContextAction(const QString& actionId) {
     const QString kind = separator < 0 ? actionId : actionId.left(separator);
     const QString value = separator < 0 ? QString() : actionId.mid(separator + 1);
     if (kind == QStringLiteral("cleanup")) {
-        const QVector<CleanupEntry> visible = cleanupEngine_.entriesForMode(cleanupEntries_, currentCleanMode());
-        bool ok = false;
-        const int index = value.toInt(&ok);
-        if (ok && index >= 0 && index < visible.size()) {
-            cleanEntries({visible.at(index)});
+        QVector<CleanupEntry> matching;
+        for (const CleanupEntry& entry : cleanupEntries_) {
+            if (entry.ruleId == value && !entry.scanOnly && !isWhitelisted(entry.path)) {
+                matching.push_back(entry);
+            }
+        }
+        if (!matching.isEmpty()) {
+            cleanEntries(matching);
         }
         return;
     }
@@ -1176,7 +1263,7 @@ void MainWindow::installTreeContextMenu(QTreeWidget* tree, int pathColumn, int c
         copy->setEnabled(!path.isEmpty());
         whitelist->setEnabled(!path.isEmpty());
         viewCommand->setEnabled(!command.isEmpty());
-        run->setEnabled(!actionId.isEmpty() || !command.isEmpty());
+        run->setEnabled(!actionId.isEmpty());
         QAction* selected = menu.exec(tree->viewport()->mapToGlobal(position));
         if (selected == open) {
             const QFileInfo info(path);
@@ -1187,8 +1274,6 @@ void MainWindow::installTreeContextMenu(QTreeWidget* tree, int pathColumn, int c
             QMessageBox::information(this, QStringLiteral("底层命令"), command);
         } else if (selected == run && !actionId.isEmpty()) {
             runContextAction(actionId);
-        } else if (selected == run && confirmAction(this, QStringLiteral("单独执行"), QStringLiteral("确认执行以下命令？\n\n%1").arg(command))) {
-            runShellCommandAsync(QStringLiteral("右键单独执行"), command);
         } else if (selected == whitelist) {
             addToWhitelist(path);
         } else if (selected == logs) {
@@ -1205,15 +1290,26 @@ void MainWindow::refreshDiskInfo() {
 }
 
 void MainWindow::startScan() {
-    if (scanWatcher_->isRunning()) {
+    if (scanWatcher_->isRunning() || (cleanWatcher_ && cleanWatcher_->isRunning())) {
+        return;
+    }
+    const QSet<QString> selectedRuleIds = selectedCleanupRuleIds();
+    if (selectedRuleIds.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("扫描"), QStringLiteral("请先勾选需要扫描的清理项。"));
         return;
     }
     cleanupEntries_.clear();
-    cleanupTree_->clear();
+    lastScannedCleanupRuleIds_ = selectedRuleIds;
+    cleanupScanCompleted_ = false;
+    cleanupScanInProgress_ = true;
     scanProgress_->setRange(0, 0);
     currentScanPath_->setText(QStringLiteral("正在扫描 C 盘清理路径..."));
-    scanWatcher_->setFuture(QtConcurrent::run([this] {
-        return cleanupEngine_.scanSystem([this](const QString& path, int count) {
+    cleanStatusLabel_->setText(QStringLiteral("正在扫描已选择的 %1 条清理规则...").arg(selectedRuleIds.size()));
+    cleanupScanButton_->setEnabled(false);
+    cleanupCleanButton_->setEnabled(false);
+    populateCleanupTree();
+    scanWatcher_->setFuture(QtConcurrent::run([this, selectedRuleIds] {
+        return CleanupEngine().scanRules(selectedRuleIds, [this](const QString& path, int count) {
             QMetaObject::invokeMethod(this, [this, path, count] {
                 currentScanPath_->setText(QStringLiteral("正在扫描: %1 (%2)").arg(QDir::toNativeSeparators(path)).arg(count));
             }, Qt::QueuedConnection);
@@ -1224,97 +1320,275 @@ void MainWindow::startScan() {
 void MainWindow::finishScan() {
     const CleanupScanResult result = scanWatcher_->result();
     cleanupEntries_ = result.entries;
+    cleanupScanInProgress_ = false;
+    cleanupScanCompleted_ = true;
     scanProgress_->setRange(0, 100);
     scanProgress_->setValue(100);
     populateCleanupTree();
-    qint64 reclaim = 0;
-    for (const CleanupEntry& entry : cleanupEngine_.entriesForMode(cleanupEntries_, currentCleanMode())) {
-        reclaim += entry.size;
+    QSet<QString> matchedRules;
+    for (const CleanupEntry& entry : cleanupEntries_) {
+        matchedRules.insert(entry.ruleId);
     }
-    reclaimSpaceLabel_->setText(QStringLiteral("可释放 %1").arg(CleanupEngine::formatSize(reclaim)));
-    currentScanPath_->setText(QStringLiteral("扫描完成，共 %1 项。").arg(cleanupEntries_.size()));
-    cleanStatusLabel_->setText(QStringLiteral("扫描完成，清理前会自动备份可恢复文件。"));
+    currentScanPath_->setText(QStringLiteral("扫描完成：%1 条规则发现内容，共检查 %2 个文件。")
+        .arg(matchedRules.size())
+        .arg(result.scannedCount));
+    cleanStatusLabel_->setText(QStringLiteral("扫描完成。可清理项会逐文件备份；标记为“仅分析”的项目不会删除。"));
+    cleanupScanButton_->setEnabled(true);
     refreshDiskInfo();
-    showOperationLog(QStringLiteral("C 盘清理扫描完成，共 %1 项").arg(cleanupEntries_.size()));
+    showOperationLog(QStringLiteral("C 盘清理扫描完成，规则 %1 条，文件 %2 个，扫描占用 %3")
+        .arg(lastScannedCleanupRuleIds_.size())
+        .arg(result.scannedCount)
+        .arg(CleanupEngine::formatSize(result.totalBytes)));
 }
 
 void MainWindow::populateCleanupTree() {
     if (!cleanupTree_) {
         return;
     }
+    const bool hadCatalog = cleanupTree_->topLevelItemCount() > 0;
+    QSet<QString> checkedRuleIds;
+    const QString currentRuleId = cleanupTree_->currentItem()
+        ? cleanupTree_->currentItem()->data(0, CleanupRuleIdRole).toString()
+        : QString();
+    if (hadCatalog) {
+        checkedRuleIds = selectedCleanupRuleIds();
+    }
+
+    QMap<QString, qint64> sizes;
+    QMap<QString, int> fileCounts;
+    QMap<QString, QString> firstPaths;
+    for (const CleanupEntry& entry : cleanupEntries_) {
+        sizes[entry.ruleId] += entry.size;
+        fileCounts[entry.ruleId] += entry.files.size();
+        if (!firstPaths.contains(entry.ruleId)) {
+            firstPaths.insert(entry.ruleId, entry.path);
+        }
+    }
+
+    QSignalBlocker blocker(cleanupTree_);
     cleanupTree_->clear();
-    const QVector<CleanupEntry> entries = cleanupEngine_.entriesForMode(cleanupEntries_, currentCleanMode());
     QMap<QString, QTreeWidgetItem*> groups;
-    for (int i = 0; i < entries.size(); ++i) {
-        const CleanupEntry& entry = entries.at(i);
-        QTreeWidgetItem* group = groups.value(entry.category);
+    QTreeWidgetItem* itemToSelect = nullptr;
+    for (const CleanupRule& rule : CleanupEngine::cleanupRules()) {
+        QTreeWidgetItem* group = groups.value(rule.category);
         if (!group) {
             group = new QTreeWidgetItem(cleanupTree_);
-            group->setText(0, entry.category);
-            group->setFirstColumnSpanned(false);
+            group->setText(0, rule.category);
+            group->setFlags(group->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsAutoTristate);
             group->setExpanded(true);
-            groups.insert(entry.category, group);
+            for (int column = 0; column < cleanupTree_->columnCount(); ++column) {
+                group->setBackground(column, QBrush(QColor(QStringLiteral("#eef9f3"))));
+                QFont font = group->font(column);
+                font.setBold(true);
+                group->setFont(column, font);
+            }
+            groups.insert(rule.category, group);
         }
         auto* row = new QTreeWidgetItem(group);
-        row->setText(0, entry.title);
-        row->setText(1, CleanupEngine::formatSize(entry.size));
-        row->setText(2, entry.riskLabel);
-        row->setText(3, entry.scanOnly ? QStringLiteral("需深度确认") : QStringLiteral("可清理"));
-        row->setText(4, QDir::toNativeSeparators(entry.path));
-        row->setData(0, Qt::UserRole, i);
-        row->setData(0, CommandRole, QStringLiteral("清理引擎删除所列路径并在删除前自动备份"));
-        row->setData(0, ContextActionRole, QStringLiteral("cleanup:%1").arg(i));
-        const bool whitelisted = isWhitelisted(entry.path);
-        row->setCheckState(0, whitelisted ? Qt::Unchecked : Qt::Checked);
-        row->setDisabled(whitelisted);
-        const QString tooltip = QStringLiteral("功能说明: %1\n适用场景: %2\n风险等级: %3")
-            .arg(entry.title, entry.category, entry.riskLabel);
+        row->setText(0, rule.title);
+        const bool wasScanned = lastScannedCleanupRuleIds_.contains(rule.id);
+        const qint64 size = sizes.value(rule.id);
+        const int fileCount = fileCounts.value(rule.id);
+        row->setText(1, wasScanned && !cleanupScanInProgress_ ? CleanupEngine::formatSize(size) : QStringLiteral("--"));
+        row->setText(2, wasScanned && !cleanupScanInProgress_ ? QString::number(fileCount) : QStringLiteral("--"));
+        if (cleanupScanInProgress_) {
+            row->setText(3, wasScanned ? QStringLiteral("扫描中") : QStringLiteral("未选择"));
+        } else if (!cleanupScanCompleted_) {
+            row->setText(3, QStringLiteral("等待扫描"));
+        } else if (!wasScanned) {
+            row->setText(3, QStringLiteral("未扫描"));
+        } else if (fileCount <= 0) {
+            row->setText(3, QStringLiteral("未发现"));
+        } else {
+            row->setText(3, rule.scanOnly ? QStringLiteral("仅分析") : QStringLiteral("可清理"));
+        }
+        row->setText(4, rule.riskLabel);
+        row->setData(0, CleanupRuleIdRole, rule.id);
+        row->setData(0, CleanupDescriptionRole, rule.description);
+        row->setData(0, CleanupPathsRole, rule.paths);
+        row->setData(0, CleanupRiskRole, rule.riskLabel);
+        row->setData(0, CleanupScanOnlyRole, rule.scanOnly);
+        row->setData(0, CleanupSizeRole, size);
+        row->setData(0, CleanupFileCountRole, fileCount);
+        if (rule.id == currentRuleId) {
+            itemToSelect = row;
+        }
+        row->setData(0, PathRole, firstPaths.value(rule.id, rule.paths.value(0)));
+        row->setData(0, CommandRole, rule.scanOnly
+            ? QStringLiteral("仅扫描并统计，不执行删除")
+            : QStringLiteral("逐文件备份后删除匹配的清理项"));
+        if (!rule.scanOnly && fileCount > 0) {
+            row->setData(0, ContextActionRole, QStringLiteral("cleanup:%1").arg(rule.id));
+        }
+        row->setFlags(row->flags() | Qt::ItemIsUserCheckable);
+        row->setCheckState(0, (hadCatalog ? checkedRuleIds.contains(rule.id) : rule.recommended) ? Qt::Checked : Qt::Unchecked);
+        const QString tooltip = QStringLiteral("%1\n风险等级: %2\n扫描位置:\n%3")
+            .arg(rule.description, rule.riskLabel, rule.paths.join(QLatin1Char('\n')));
         for (int column = 0; column < cleanupTree_->columnCount(); ++column) {
             row->setToolTip(column, tooltip);
         }
-        if (entry.riskLabel != QStringLiteral("安全")) {
+        if (rule.riskLabel == QStringLiteral("高风险")) {
+            for (int column = 0; column < cleanupTree_->columnCount(); ++column) {
+                row->setBackground(column, QBrush(QColor(QStringLiteral("#fdecec"))));
+            }
+        } else if (rule.riskLabel != QStringLiteral("安全")) {
             for (int column = 0; column < cleanupTree_->columnCount(); ++column) {
                 row->setBackground(column, QBrush(QColor(QStringLiteral("#fff3cd"))));
             }
         }
     }
-}
 
-void MainWindow::updateCleanMode(bool deep) {
-    if (deep && deepMode_->isChecked()) {
-        if (!confirmAction(
-                this,
-                QStringLiteral("全选 / 深度风险确认"),
-                QStringLiteral("深度模式包含更新缓存、回收站和安装包等谨慎项。请核对完整路径并确认备份后再清理。是否继续？")
-            )) {
-            deep = false;
+    for (int groupIndex = 0; groupIndex < cleanupTree_->topLevelItemCount(); ++groupIndex) {
+        QTreeWidgetItem* group = cleanupTree_->topLevelItem(groupIndex);
+        qint64 groupSize = 0;
+        int groupFiles = 0;
+        int scannedRules = 0;
+        for (int childIndex = 0; childIndex < group->childCount(); ++childIndex) {
+            QTreeWidgetItem* row = group->child(childIndex);
+            groupSize += row->data(0, CleanupSizeRole).toLongLong();
+            groupFiles += row->data(0, CleanupFileCountRole).toInt();
+            if (lastScannedCleanupRuleIds_.contains(row->data(0, CleanupRuleIdRole).toString())) {
+                ++scannedRules;
+            }
         }
+        group->setText(1, cleanupScanCompleted_ ? CleanupEngine::formatSize(groupSize) : QStringLiteral("--"));
+        group->setText(2, cleanupScanCompleted_ ? QString::number(groupFiles) : QStringLiteral("--"));
+        group->setText(3, cleanupScanCompleted_
+            ? QStringLiteral("已扫描 %1/%2").arg(scannedRules).arg(group->childCount())
+            : (cleanupScanInProgress_ ? QStringLiteral("扫描中") : QStringLiteral("等待扫描")));
     }
-    recommendedMode_->setChecked(!deep);
-    deepMode_->setChecked(deep);
-    populateCleanupTree();
+
+    blocker.unblock();
+    if (!itemToSelect && cleanupTree_->topLevelItemCount() > 0 && cleanupTree_->topLevelItem(0)->childCount() > 0) {
+        itemToSelect = cleanupTree_->topLevelItem(0)->child(0);
+    }
+    if (itemToSelect) {
+        cleanupTree_->setCurrentItem(itemToSelect);
+    }
+    updateCleanupSelectionSummary();
 }
 
-CleanupEngine::CleanMode MainWindow::currentCleanMode() const {
-    return deepMode_ && deepMode_->isChecked()
-        ? CleanupEngine::CleanMode::Deep
-        : CleanupEngine::CleanMode::Recommended;
-}
-
-QVector<CleanupEntry> MainWindow::selectedCleanupEntries() const {
-    const QVector<CleanupEntry> visible = cleanupEngine_.entriesForMode(cleanupEntries_, currentCleanMode());
-    QVector<CleanupEntry> selected;
+void MainWindow::setCleanupSelection(bool checked) {
+    QSignalBlocker blocker(cleanupTree_);
     for (int groupIndex = 0; groupIndex < cleanupTree_->topLevelItemCount(); ++groupIndex) {
         QTreeWidgetItem* group = cleanupTree_->topLevelItem(groupIndex);
         for (int childIndex = 0; childIndex < group->childCount(); ++childIndex) {
-            QTreeWidgetItem* item = group->child(childIndex);
-            if (item->checkState(0) != Qt::Checked) {
-                continue;
+            group->child(childIndex)->setCheckState(0, checked ? Qt::Checked : Qt::Unchecked);
+        }
+    }
+    blocker.unblock();
+    updateCleanupSelectionSummary();
+}
+
+void MainWindow::restoreDefaultCleanupSelection() {
+    QMap<QString, bool> defaults;
+    for (const CleanupRule& rule : CleanupEngine::cleanupRules()) {
+        defaults.insert(rule.id, rule.recommended);
+    }
+    QSignalBlocker blocker(cleanupTree_);
+    for (int groupIndex = 0; groupIndex < cleanupTree_->topLevelItemCount(); ++groupIndex) {
+        QTreeWidgetItem* group = cleanupTree_->topLevelItem(groupIndex);
+        for (int childIndex = 0; childIndex < group->childCount(); ++childIndex) {
+            QTreeWidgetItem* row = group->child(childIndex);
+            row->setCheckState(0, defaults.value(row->data(0, CleanupRuleIdRole).toString()) ? Qt::Checked : Qt::Unchecked);
+        }
+    }
+    blocker.unblock();
+    updateCleanupSelectionSummary();
+}
+
+void MainWindow::resetCleanupCatalog() {
+    if (scanWatcher_->isRunning() || (cleanWatcher_ && cleanWatcher_->isRunning())) {
+        return;
+    }
+    cleanupEntries_.clear();
+    lastScannedCleanupRuleIds_.clear();
+    cleanupScanCompleted_ = false;
+    cleanupScanInProgress_ = false;
+    scanProgress_->setRange(0, 100);
+    scanProgress_->setValue(0);
+    currentScanPath_->setText(QStringLiteral("等待扫描。"));
+    cleanStatusLabel_->setText(QStringLiteral("已刷新清理规则，勾选后点击“扫描”。"));
+    populateCleanupTree();
+}
+
+void MainWindow::updateCleanupDetails(QTreeWidgetItem* item) {
+    if (!item) {
+        return;
+    }
+    if (!item->parent()) {
+        cleanupDescriptionTitle_->setText(item->text(0));
+        cleanupDescriptionMeta_->setText(QStringLiteral("%1 个细分清理项").arg(item->childCount()));
+        cleanupDescriptionText_->setText(QStringLiteral("展开分组并选择具体规则。勾选状态同时决定下一次扫描范围。"));
+        cleanupDescriptionPaths_->setText(QStringLiteral("选择具体清理项后显示路径。"));
+        return;
+    }
+    const bool scanOnly = item->data(0, CleanupScanOnlyRole).toBool();
+    cleanupDescriptionTitle_->setText(item->text(0));
+    cleanupDescriptionMeta_->setText(QStringLiteral("风险: %1 | 操作: %2 | 当前: %3")
+        .arg(item->data(0, CleanupRiskRole).toString(), scanOnly ? QStringLiteral("仅分析") : QStringLiteral("备份后清理"), item->text(3)));
+    cleanupDescriptionText_->setText(item->data(0, CleanupDescriptionRole).toString());
+    const QStringList paths = item->data(0, CleanupPathsRole).toStringList();
+    cleanupDescriptionPaths_->setText(paths.isEmpty() ? QStringLiteral("--") : paths.join(QLatin1Char('\n')));
+}
+
+void MainWindow::updateCleanupSelectionSummary() {
+    const QSet<QString> selectedIds = selectedCleanupRuleIds();
+    QSet<QString> scanOnlyIds;
+    for (const CleanupRule& rule : CleanupEngine::cleanupRules()) {
+        if (rule.scanOnly) {
+            scanOnlyIds.insert(rule.id);
+        }
+    }
+    int analysisOnly = 0;
+    for (const QString& id : selectedIds) {
+        if (scanOnlyIds.contains(id)) {
+            ++analysisOnly;
+        }
+    }
+    cleanupSelectionLabel_->setText(QStringLiteral("已选择 %1 / %2 项，其中 %3 项仅做空间分析")
+        .arg(selectedIds.size())
+        .arg(CleanupEngine::cleanupRules().size())
+        .arg(analysisOnly));
+
+    qint64 reclaim = 0;
+    for (const CleanupEntry& entry : selectedCleanupEntries()) {
+        reclaim += entry.size;
+    }
+    reclaimSpaceLabel_->setText(cleanupScanCompleted_
+        ? QStringLiteral("可释放 %1").arg(CleanupEngine::formatSize(reclaim))
+        : QStringLiteral("可释放 --"));
+    if (cleanupScanButton_) {
+        cleanupScanButton_->setEnabled(!cleanupScanInProgress_ && !(cleanWatcher_ && cleanWatcher_->isRunning()));
+    }
+    if (cleanupCleanButton_) {
+        cleanupCleanButton_->setEnabled(cleanupScanCompleted_ && reclaim > 0 && !cleanupScanInProgress_ && !(cleanWatcher_ && cleanWatcher_->isRunning()));
+    }
+}
+
+QSet<QString> MainWindow::selectedCleanupRuleIds() const {
+    QSet<QString> selected;
+    if (!cleanupTree_) {
+        return selected;
+    }
+    for (int groupIndex = 0; groupIndex < cleanupTree_->topLevelItemCount(); ++groupIndex) {
+        QTreeWidgetItem* group = cleanupTree_->topLevelItem(groupIndex);
+        for (int childIndex = 0; childIndex < group->childCount(); ++childIndex) {
+            QTreeWidgetItem* row = group->child(childIndex);
+            if (row->checkState(0) == Qt::Checked) {
+                selected.insert(row->data(0, CleanupRuleIdRole).toString());
             }
-            const int index = item->data(0, Qt::UserRole).toInt();
-            if (index >= 0 && index < visible.size() && !isWhitelisted(visible.at(index).path)) {
-                selected.push_back(visible.at(index));
-            }
+        }
+    }
+    return selected;
+}
+
+QVector<CleanupEntry> MainWindow::selectedCleanupEntries() const {
+    const QSet<QString> selectedRuleIds = selectedCleanupRuleIds();
+    QVector<CleanupEntry> selected;
+    for (const CleanupEntry& entry : cleanupEntries_) {
+        if (selectedRuleIds.contains(entry.ruleId) && !entry.scanOnly && !isWhitelisted(entry.path)) {
+            selected.push_back(entry);
         }
     }
     return selected;
@@ -1326,6 +1600,10 @@ void MainWindow::cleanSelected() {
         return;
     }
     const QVector<CleanupEntry> selected = selectedCleanupEntries();
+    if (!cleanupScanCompleted_) {
+        QMessageBox::information(this, QStringLiteral("清理"), QStringLiteral("请先扫描已勾选的清理项。"));
+        return;
+    }
     cleanEntries(selected);
 }
 
@@ -1335,23 +1613,36 @@ void MainWindow::cleanEntries(const QVector<CleanupEntry>& selected) {
         return;
     }
     if (selected.isEmpty()) {
-        QMessageBox::information(this, QStringLiteral("清理选中"), QStringLiteral("请先扫描并勾选需要清理的项目。"));
+        QMessageBox::information(this, QStringLiteral("清理"), QStringLiteral("没有可清理内容。未发现文件、未扫描或标记为“仅分析”的项目不会执行删除。"));
         return;
+    }
+    qint64 selectedBytes = 0;
+    int selectedFiles = 0;
+    QSet<QString> selectedRules;
+    for (const CleanupEntry& entry : selected) {
+        selectedBytes += entry.size;
+        selectedFiles += entry.files.size();
+        selectedRules.insert(entry.ruleId);
     }
     if (!confirmAction(
             this,
             QStringLiteral("清理确认"),
-            QStringLiteral("将清理 %1 项。可恢复文件会在删除前自动备份；回收站清空无法备份。是否继续？").arg(selected.size())
+            QStringLiteral("将清理 %1 条规则中的 %2 个文件，预计 %3。\n\n可恢复文件会在删除前自动备份；回收站清空无法备份。是否继续？")
+                .arg(selectedRules.size())
+                .arg(selectedFiles)
+                .arg(CleanupEngine::formatSize(selectedBytes))
         )) {
         return;
     }
     CleanOptions options;
     options.backup = true;
     options.simulate = false;
-    options.allowScanOnly = currentCleanMode() == CleanupEngine::CleanMode::Deep;
+    options.allowScanOnly = false;
     options.backupRoot = backupRoot_;
     cleanFreeBytesBefore_ = cleanupEngine_.diskInfo().freeBytes;
     cleanStatusLabel_->setText(QStringLiteral("正在清理并备份选中项目..."));
+    cleanupScanButton_->setEnabled(false);
+    cleanupCleanButton_->setEnabled(false);
     cleanWatcher_->setFuture(QtConcurrent::run([selected, options] {
         return CleanupEngine().cleanEntriesDetailed(selected, options);
     }));

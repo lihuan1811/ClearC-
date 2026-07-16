@@ -150,13 +150,44 @@ bool ordinaryMigrationCreatesShortcutAndHandlesQuotes() {
 #endif
 }
 
-bool riskyCleanupRulesRequireDeepPerFileSelection() {
+bool detailedCleanupCatalogUsesSafeDefaults() {
+    const QSet<QString> expectedGroups = {
+        QStringLiteral("过期文件"),
+        QStringLiteral("系统相关"),
+        QStringLiteral("缓存文件"),
+        QStringLiteral("应用程序"),
+        QStringLiteral("临时文件"),
+    };
+    const QSet<QString> analysisOnly = {
+        QStringLiteral("winsxs_backup"),
+        QStringLiteral("old_windows"),
+        QStringLiteral("windows_event_logs"),
+        QStringLiteral("winsxs_temp"),
+        QStringLiteral("defender_protected_data"),
+        QStringLiteral("redundant_packages"),
+    };
+    QSet<QString> groups;
+    QSet<QString> ids;
     bool foundPackages = false;
     bool foundRecycleBin = false;
-    for (const CleanupRule& rule : CleanupEngine::cleanupRules()) {
+    bool foundAgedInstallerCache = false;
+    const QVector<CleanupRule> rules = CleanupEngine::cleanupRules();
+    for (const CleanupRule& rule : rules) {
+        groups.insert(rule.category);
+        if (!require(!ids.contains(rule.id), QStringLiteral("cleanup rule id is unique: %1").arg(rule.id))
+            || !require(!rule.description.isEmpty(), QStringLiteral("cleanup rule explains its behavior: %1").arg(rule.id))
+            || !require(!rule.paths.isEmpty(), QStringLiteral("cleanup rule has a real scan path: %1").arg(rule.id))) {
+            return false;
+        }
+        ids.insert(rule.id);
+        if (analysisOnly.contains(rule.id)
+            && (!require(rule.scanOnly, QStringLiteral("dangerous cleanup remains analysis-only: %1").arg(rule.id))
+                || !require(!rule.recommended, QStringLiteral("dangerous cleanup is not selected by default: %1").arg(rule.id)))) {
+            return false;
+        }
         if (rule.id == QStringLiteral("redundant_packages")) {
             foundPackages = true;
-            if (!require(rule.scanOnly, QStringLiteral("user packages require deep mode"))
+            if (!require(rule.scanOnly, QStringLiteral("user packages are analysis-only"))
                 || !require(!rule.recommended, QStringLiteral("user packages are not recommended by default"))
                 || !require(!rule.aggregate, QStringLiteral("user packages are displayed one file at a time"))) {
                 return false;
@@ -164,13 +195,85 @@ bool riskyCleanupRulesRequireDeepPerFileSelection() {
         }
         if (rule.id == QStringLiteral("recycle_bin")) {
             foundRecycleBin = true;
-            if (!require(rule.aggregate, QStringLiteral("recycle bin is the only aggregate cleanup operation"))) {
+            if (!require(rule.aggregate, QStringLiteral("recycle bin is an aggregate cleanup operation"))
+                || !require(!rule.recommended, QStringLiteral("recycle bin is not selected by default"))) {
+                return false;
+            }
+        }
+        if (rule.id == QStringLiteral("installer_cache")) {
+            foundAgedInstallerCache = true;
+            if (!require(rule.minimumAgeDays == 30, QStringLiteral("installer cache applies the Python Qt age threshold"))) {
                 return false;
             }
         }
     }
-    return require(foundPackages, QStringLiteral("package cleanup rule exists"))
-        && require(foundRecycleBin, QStringLiteral("recycle bin rule exists"));
+    return require(rules.size() >= 40, QStringLiteral("cleanup catalog is fine-grained"))
+        && require(groups == expectedGroups, QStringLiteral("cleanup rules use the five visible groups"))
+        && require(foundPackages, QStringLiteral("package analysis rule exists"))
+        && require(foundRecycleBin, QStringLiteral("recycle bin rule exists"))
+        && require(foundAgedInstallerCache, QStringLiteral("aged installer cache rule exists"));
+}
+
+bool selectedRuleScanDoesNotRunTheWholeCatalog() {
+    QTemporaryDir directory;
+    if (!require(directory.isValid(), QStringLiteral("cleanup scan temporary directory is available"))) {
+        return false;
+    }
+    const QByteArray previousTemp = qgetenv("TEMP");
+    qputenv("TEMP", directory.path().toLocal8Bit());
+    const QString fixture = directory.filePath(QStringLiteral("scan-me.tmp"));
+    const bool fixtureCreated = writeFile(fixture, "cleanup");
+    const CleanupScanResult result = CleanupEngine().scanRules({QStringLiteral("user_temp")});
+    if (previousTemp.isNull()) {
+        qunsetenv("TEMP");
+    } else {
+        qputenv("TEMP", previousTemp);
+    }
+    if (!require(fixtureCreated, QStringLiteral("cleanup scan fixture is created"))) {
+        return false;
+    }
+    QSet<QString> scannedRuleIds;
+    for (const CleanupEntry& entry : result.entries) {
+        scannedRuleIds.insert(entry.ruleId);
+    }
+    return require(scannedRuleIds == QSet<QString>{QStringLiteral("user_temp")}, QStringLiteral("only checked cleanup rules are scanned"))
+        && require(result.totalBytes == 7, QStringLiteral("selected cleanup rule reports the matching file size"));
+}
+
+bool agedCleanupRulesIgnoreRecentFiles() {
+    QTemporaryDir directory;
+    if (!require(directory.isValid(), QStringLiteral("aged cleanup temporary directory is available"))) {
+        return false;
+    }
+    const QString downloads = directory.filePath(QStringLiteral("Downloads"));
+    QDir().mkpath(downloads);
+    const QString oldPath = QDir(downloads).filePath(QStringLiteral("old.part"));
+    const QString recentPath = QDir(downloads).filePath(QStringLiteral("recent.part"));
+    if (!require(writeFile(oldPath, "old") && writeFile(recentPath, "recent"), QStringLiteral("aged cleanup fixtures are created"))) {
+        return false;
+    }
+    QFile oldFile(oldPath);
+    if (!require(oldFile.open(QIODevice::ReadWrite), QStringLiteral("aged cleanup fixture can be opened"))
+        || !require(oldFile.setFileTime(QDateTime::currentDateTime().addDays(-8), QFileDevice::FileModificationTime), QStringLiteral("aged cleanup fixture timestamp is set"))) {
+        return false;
+    }
+    oldFile.close();
+
+    const QByteArray previousProfile = qgetenv("USERPROFILE");
+    qputenv("USERPROFILE", directory.path().toLocal8Bit());
+    const CleanupScanResult result = CleanupEngine().scanRules({QStringLiteral("download_residuals")});
+    if (previousProfile.isNull()) {
+        qunsetenv("USERPROFILE");
+    } else {
+        qputenv("USERPROFILE", previousProfile);
+    }
+
+    QStringList matches;
+    for (const CleanupEntry& entry : result.entries) {
+        matches.append(entry.files);
+    }
+    return require(matches.contains(oldPath), QStringLiteral("old download residue is included"))
+        && require(!matches.contains(recentPath), QStringLiteral("recent download residue is excluded"));
 }
 
 bool criticalOptimizationActionsProvideInverseOperations() {
@@ -203,7 +306,9 @@ int main(int argc, char* argv[]) {
         && batchRenamePreservesExtensions()
         && folderScanRetainsOnlyLargestRequestedFiles()
         && ordinaryMigrationCreatesShortcutAndHandlesQuotes()
-        && riskyCleanupRulesRequireDeepPerFileSelection()
+        && detailedCleanupCatalogUsesSafeDefaults()
+        && selectedRuleScanDoesNotRunTheWholeCatalog()
+        && agedCleanupRulesIgnoreRecentFiles()
         && criticalOptimizationActionsProvideInverseOperations();
     return ok ? 0 : 1;
 }

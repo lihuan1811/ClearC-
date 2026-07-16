@@ -34,24 +34,41 @@ def test_cleanup_matches_the_final_prd_categories_and_safety_contract():
     window = read(SRC / "MainWindow.cpp")
 
     for token in [
-        "系统临时文件",
-        "Windows 更新缓存",
-        "系统日志与报错文件",
-        "缩略图与回收站",
-        "浏览器缓存",
-        "冗余安装包、压缩包与镜像",
-        "Edge 缓存",
-        "Chrome 缓存",
+        "过期文件",
+        "系统相关",
+        "缓存文件",
+        "应用程序",
+        "临时文件",
+        "Windows 更新下载缓存",
+        "Windows 错误报告",
+        "Windows 预读取文件",
+        "Microsoft Edge 缓存",
+        "Google Chrome 缓存",
+        "Mozilla Firefox 缓存",
         "QQ 浏览器缓存",
+        "Microsoft Store 缓存",
+        "OneDrive 日志缓存",
+        "下载未完成残留",
     ]:
         assert token in engine
 
     for token in [
-        "CleanMode::Deep",
-        "推荐选项",
-        "全选 / 深度",
-        "深度风险确认",
-        "清理前会自动备份",
+        "scanRules",
+        "minimumAgeDays",
+        "description",
+        "全不选",
+        "默认",
+        "刷新",
+        "清理项",
+        "文件",
+        "状态",
+        "说明",
+        "扫描位置",
+        "等待扫描",
+        "仅分析",
+        "setCleanupSelection",
+        "restoreDefaultCleanupSelection",
+        "selectedCleanupRuleIds",
         "options.backup = true",
         "风险等级",
         "添加白名单",
@@ -62,6 +79,7 @@ def test_cleanup_matches_the_final_prd_categories_and_safety_contract():
     assert "wechat_special_clean" not in engine
     assert "qq_special_clean" not in engine
     assert "浏览器保存密码" not in engine
+    assert "allowScanOnly = true" not in window
 
 
 def test_uninstall_supports_registry_uwp_search_sort_backup_batch_and_residuals():

@@ -20,10 +20,12 @@ struct CleanupRule {
     QString id;
     QString category;
     QString title;
+    QString description;
     QString riskLabel;
     QStringList paths;
     QStringList patterns;
     QStringList pathContains;
+    int minimumAgeDays = 0;
     bool scanOnly = false;
     bool aggregate = true;
     bool recommended = true;
@@ -84,11 +86,6 @@ struct BackupInfo {
 
 class CleanupEngine {
 public:
-    enum class CleanMode {
-        Recommended,
-        Deep,
-    };
-
     using ProgressCallback = std::function<void(const QString& path, int count)>;
 
     CleanupEngine();
@@ -97,10 +94,10 @@ public:
     CleanupScanResult scanSystem(
         const ProgressCallback& progress = {}
     );
-    QVector<CleanupEntry> entriesForMode(
-        const QVector<CleanupEntry>& entries,
-        CleanMode mode
-    ) const;
+    CleanupScanResult scanRules(
+        const QSet<QString>& ruleIds,
+        const ProgressCallback& progress = {}
+    );
     qint64 cleanEntries(
         const QVector<CleanupEntry>& entries,
         const CleanOptions& options,
