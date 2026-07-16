@@ -479,6 +479,72 @@ QVector<WindowsOptimizationAction> SystemCatalog::officeOptimizationActions() {
             }
         ),
         action(
+            QStringLiteral("office_explorer_extensions"),
+            QStringLiteral("显示已知文件扩展名"),
+            QStringLiteral("在资源管理器中显示完整扩展名，便于识别真实文件类型。"),
+            QStringLiteral("外观与资源管理器"),
+            QStringLiteral("安全"),
+            {regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced"), QStringLiteral("HideFileExt"), QStringLiteral("0"), QStringLiteral("显示文件扩展名"))},
+            {regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced"), QStringLiteral("HideFileExt"), QStringLiteral("1"), QStringLiteral("恢复隐藏已知文件扩展名"))}
+        ),
+        action(
+            QStringLiteral("office_quick_access_history"),
+            QStringLiteral("关闭快速访问历史"),
+            QStringLiteral("不在快速访问中显示最近文件和常用文件夹。"),
+            QStringLiteral("外观与资源管理器"),
+            QStringLiteral("安全"),
+            {
+                regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer"), QStringLiteral("ShowRecent"), QStringLiteral("0"), QStringLiteral("隐藏最近文件")),
+                regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer"), QStringLiteral("ShowFrequent"), QStringLiteral("0"), QStringLiteral("隐藏常用文件夹")),
+            },
+            {
+                regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer"), QStringLiteral("ShowRecent"), QStringLiteral("1"), QStringLiteral("恢复最近文件")),
+                regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer"), QStringLiteral("ShowFrequent"), QStringLiteral("1"), QStringLiteral("恢复常用文件夹")),
+            }
+        ),
+        action(
+            QStringLiteral("office_advertising_id"),
+            QStringLiteral("关闭应用广告标识"),
+            QStringLiteral("禁止 Windows 应用使用当前用户广告标识提供个性化广告。"),
+            QStringLiteral("隐私"),
+            QStringLiteral("安全"),
+            {regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\AdvertisingInfo"), QStringLiteral("Enabled"), QStringLiteral("0"), QStringLiteral("关闭广告标识"))},
+            {regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\AdvertisingInfo"), QStringLiteral("Enabled"), QStringLiteral("1"), QStringLiteral("恢复广告标识"))}
+        ),
+        action(
+            QStringLiteral("office_game_capture"),
+            QStringLiteral("关闭 Xbox 游戏录制"),
+            QStringLiteral("关闭 Game DVR 后台录制；仍可正常运行游戏，但 Win+G 录制能力会受限。"),
+            QStringLiteral("游戏录制"),
+            QStringLiteral("谨慎"),
+            {
+                regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR"), QStringLiteral("AppCaptureEnabled"), QStringLiteral("0"), QStringLiteral("关闭应用录制")),
+                regAdd(QStringLiteral("HKCU\\System\\GameConfigStore"), QStringLiteral("GameDVR_Enabled"), QStringLiteral("0"), QStringLiteral("关闭 Game DVR")),
+            },
+            {
+                regAdd(QStringLiteral("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR"), QStringLiteral("AppCaptureEnabled"), QStringLiteral("1"), QStringLiteral("恢复应用录制")),
+                regAdd(QStringLiteral("HKCU\\System\\GameConfigStore"), QStringLiteral("GameDVR_Enabled"), QStringLiteral("1"), QStringLiteral("恢复 Game DVR")),
+            },
+            false,
+            false
+        ),
+        action(
+            QStringLiteral("office_edge_background"),
+            QStringLiteral("关闭 Edge 后台运行和启动增强"),
+            QStringLiteral("通过 Microsoft Edge 官方策略关闭后台模式和启动增强。"),
+            QStringLiteral("Edge 优化"),
+            QStringLiteral("安全"),
+            {
+                regAdd(QStringLiteral("HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge"), QStringLiteral("BackgroundModeEnabled"), QStringLiteral("0"), QStringLiteral("关闭 Edge 后台模式")),
+                regAdd(QStringLiteral("HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge"), QStringLiteral("StartupBoostEnabled"), QStringLiteral("0"), QStringLiteral("关闭 Edge 启动增强")),
+            },
+            {
+                regDelete(QStringLiteral("HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge"), QStringLiteral("BackgroundModeEnabled"), QStringLiteral("恢复 Edge 后台模式策略")),
+                regDelete(QStringLiteral("HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge"), QStringLiteral("StartupBoostEnabled"), QStringLiteral("恢复 Edge 启动增强策略")),
+            },
+            true
+        ),
+        action(
             QStringLiteral("office_animation"),
             QStringLiteral("适度精简窗口动画"),
             QStringLiteral("关闭透明效果，保留常用界面能力。"),

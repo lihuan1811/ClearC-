@@ -26,6 +26,11 @@ struct UninstallResult {
     QStringList errors;
 };
 
+struct UninstallProcessLaunch {
+    QString program;
+    QStringList arguments;
+};
+
 class SoftwareUninstallEngine {
 public:
     QVector<InstalledApplication> installedApplications() const;
@@ -34,5 +39,6 @@ public:
     QStringList findResidualPaths(const InstalledApplication& app) const;
     UninstallResult cleanResiduals(const InstalledApplication& app) const;
 
+    static UninstallProcessLaunch buildProcessLaunch(const InstalledApplication& app);
     static QString registryBackupRoot();
 };

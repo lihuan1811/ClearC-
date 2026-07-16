@@ -17,6 +17,7 @@
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QTableWidget>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTextEdit>
 #include <QTreeWidget>
@@ -72,6 +73,7 @@ private:
     void openBackupManager();
 
     void refreshInstalledApps();
+    void setUninstallBusy(bool busy, const QString& message = {});
     void populateUninstallTable();
     void filterInstalledApps(const QString& text);
     void uninstallApplication(int appIndex, bool strong);
@@ -81,6 +83,7 @@ private:
 
     QTableWidget* createOptimizationTable(QWidget* parent);
     void populateOptimizationTable(QTableWidget* table, const QVector<WindowsOptimizationAction>& actions);
+    void setOptimizationBusy(bool busy, const QString& message = {});
     void runOptimizationAction(const WindowsOptimizationAction& action, bool revert);
     void applyOptimizationPreset(QTableWidget* table, const QVector<WindowsOptimizationAction>& actions, const QString& title, bool deep);
     void refreshGpuInfo();
@@ -91,6 +94,10 @@ private:
     void refreshDisks();
     void selectDiskRoot(const QString& rootPath);
     void scanFolderUsage();
+    void scanFolderUsagePath(const QString& rootPath);
+    void openFolderUsagePath(const QString& rootPath);
+    void navigateFolderUsageBack();
+    void setFileLoading(bool loading, const QString& message = {});
     void scanManagedFiles();
     void populateManagedFiles(const QVector<ManagedFileEntry>& files);
     void runFileOperationAsync(
@@ -156,11 +163,18 @@ private:
     QFutureWatcher<CleanResult>* cleanWatcher_ = nullptr;
 
     QLineEdit* uninstallSearchEdit_ = nullptr;
+    QTabBar* uninstallCategoryTabs_ = nullptr;
     QTableWidget* uninstallTable_ = nullptr;
+    QPushButton* uninstallRefreshButton_ = nullptr;
+    QPushButton* uninstallBatchButton_ = nullptr;
+    QLabel* uninstallStatusLabel_ = nullptr;
+    QProgressBar* uninstallProgress_ = nullptr;
     QVector<InstalledApplication> installedApps_;
     QFutureWatcher<QVector<InstalledApplication>>* uninstallWatcher_ = nullptr;
+    bool uninstallBusy_ = false;
 
     QTabWidget* optimizationTabs_ = nullptr;
+    QProgressBar* optimizationProgress_ = nullptr;
     QTableWidget* officeOptimizationTable_ = nullptr;
     QTableWidget* gamingOptimizationTable_ = nullptr;
     QTableWidget* advancedControlTable_ = nullptr;
@@ -180,17 +194,28 @@ private:
     QTabWidget* fileTabs_ = nullptr;
     QWidget* folderUsagePage_ = nullptr;
     QTreeWidget* folderUsageTree_ = nullptr;
+    QLabel* folderUsagePathLabel_ = nullptr;
+    QPushButton* folderUsageBackButton_ = nullptr;
+    QPushButton* folderUsageScanButton_ = nullptr;
     QTableWidget* folderExtensionTable_ = nullptr;
     QGraphicsScene* folderUsageMapScene_ = nullptr;
     QGraphicsView* folderUsageMapView_ = nullptr;
     QTableWidget* managedFileTable_ = nullptr;
+    QPushButton* managedFileScanButton_ = nullptr;
     QTableWidget* migrationTable_ = nullptr;
     QLineEdit* migrationTargetEdit_ = nullptr;
+    QProgressBar* fileBusyProgress_ = nullptr;
+    QString folderUsageRoot_;
+    QString pendingFolderUsageRoot_;
+    QStringList folderUsageHistory_;
+    QString selectedTreemapExtension_;
     QVector<ManagedFileEntry> managedFiles_;
     QFutureWatcher<FolderUsageScan>* folderUsageWatcher_ = nullptr;
     QFutureWatcher<QVector<ManagedFileEntry>>* managedFileWatcher_ = nullptr;
     QFutureWatcher<QVector<MigrationFolder>>* migrationWatcher_ = nullptr;
     bool fileOperationRunning_ = false;
+    int fileLoadingCount_ = 0;
+    bool optimizationBusy_ = false;
 
     QCheckBox* recommendedRepairMode_ = nullptr;
     QCheckBox* deepRepairMode_ = nullptr;

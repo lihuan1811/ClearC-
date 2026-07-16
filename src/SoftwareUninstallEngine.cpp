@@ -12,6 +12,7 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QThread>
 
 #include <algorithm>
 
@@ -90,6 +91,90 @@ bool registryKeyExists(const QString& key) {
 #endif
 }
 
+bool commandNeedsShell(const QString& command) {
+    bool quoted = false;
+    for (int index = 0; index < command.size(); ++index) {
+        const QChar current = command.at(index);
+        if (current == QLatin1Char('"')) {
+            quoted = !quoted;
+            continue;
+        }
+        if (!quoted && (current == QLatin1Char('&') || current == QLatin1Char('|')
+            || current == QLatin1Char('<') || current == QLatin1Char('>'))) {
+            return true;
+        }
+    }
+    return QRegularExpression(QStringLiteral("%[^%]+%")).match(command).hasMatch();
+}
+
+void normalizeMsiArguments(QStringList* arguments) {
+    if (!arguments) {
+        return;
+    }
+    static const QRegularExpression inlineInstall(
+        QStringLiteral("^/I(?=\\{)"),
+        QRegularExpression::CaseInsensitiveOption
+    );
+    for (QString& argument : *arguments) {
+        if (argument.compare(QStringLiteral("/I"), Qt::CaseInsensitive) == 0) {
+            argument = QStringLiteral("/X");
+        } else {
+            argument.replace(inlineInstall, QStringLiteral("/X"));
+        }
+    }
+}
+
+bool storePackageExists(const QString& packageFullName, bool* querySucceeded = nullptr) {
+#ifdef Q_OS_WIN
+    if (querySucceeded) {
+        *querySucceeded = false;
+    }
+    if (packageFullName.isEmpty()) {
+        return false;
+    }
+    QProcess process;
+    process.start(
+        QStringLiteral("powershell.exe"),
+        {
+            QStringLiteral("-NoProfile"),
+            QStringLiteral("-NonInteractive"),
+            QStringLiteral("-Command"),
+            QStringLiteral("& { param([string]$Package) $ErrorActionPreference='Stop'; try { if (Get-AppxPackage | Where-Object { $_.PackageFullName -eq $Package }) { exit 0 }; exit 1 } catch { exit 2 } }"),
+            packageFullName,
+        }
+    );
+    const bool finished = process.waitForFinished(20000);
+    if (querySucceeded) {
+        *querySucceeded = finished && (process.exitCode() == 0 || process.exitCode() == 1);
+    }
+    return finished && process.exitCode() == 0;
+#else
+    Q_UNUSED(packageFullName);
+    if (querySucceeded) {
+        *querySucceeded = false;
+    }
+    return false;
+#endif
+}
+
+bool applicationRegistrationRemoved(const InstalledApplication& app) {
+    if (app.storeApp) {
+        bool querySucceeded = false;
+        const bool exists = storePackageExists(app.packageFullName, &querySucceeded);
+        return querySucceeded && !exists;
+    }
+    if (app.registryKey.isEmpty()) {
+        return true;
+    }
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        if (!registryKeyExists(app.registryKey)) {
+            return true;
+        }
+        QThread::msleep(250);
+    }
+    return false;
+}
+
 bool isProtectedResidualPath(const QString& path) {
     const QString normalized = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
     if (normalized.isEmpty() || QDir(normalized).isRoot()) {
@@ -156,7 +241,7 @@ QVector<InstalledApplication> SoftwareUninstallEngine::installedApplications() c
         {
             QStringLiteral("-NoProfile"),
             QStringLiteral("-Command"),
-            QStringLiteral("[Console]::OutputEncoding=(New-Object System.Text.UTF8Encoding $false); Get-AppxPackage | Select-Object Name,Publisher,Version,PackageFullName,InstallLocation | ConvertTo-Json -Compress")
+            QStringLiteral("[Console]::OutputEncoding=(New-Object System.Text.UTF8Encoding $false); Get-AppxPackage | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage -and $_.NonRemovable -ne $true } | Select-Object Name,Publisher,Version,PackageFullName,InstallLocation | ConvertTo-Json -Compress")
         }
     );
     if (appx.waitForFinished(20000) && appx.exitCode() == 0) {
@@ -230,7 +315,8 @@ QString SoftwareUninstallEngine::backupRegistry(const InstalledApplication& app,
 
 UninstallResult SoftwareUninstallEngine::startUninstall(const InstalledApplication& app) const {
     UninstallResult result;
-    if (app.uninstallCommand.trimmed().isEmpty()) {
+    const UninstallProcessLaunch launch = buildProcessLaunch(app);
+    if (launch.program.trimmed().isEmpty()) {
         result.errors.push_back(QStringLiteral("没有可执行的卸载命令: %1").arg(app.name));
         return result;
     }
@@ -241,33 +327,27 @@ UninstallResult SoftwareUninstallEngine::startUninstall(const InstalledApplicati
         return result;
     }
 #ifdef Q_OS_WIN
-    QString uninstallCommand = app.uninstallCommand.trimmed();
-    static const QRegularExpression msiInstallPattern(
-        QStringLiteral("(^|\\s)/I(?=\\s*\\{)"),
-        QRegularExpression::CaseInsensitiveOption
-    );
-    uninstallCommand.replace(msiInstallPattern, QStringLiteral("\\1/X"));
-
     QProcess process;
-    process.start(
-        QStringLiteral("cmd.exe"),
-        {
-            QStringLiteral("/D"),
-            QStringLiteral("/S"),
-            QStringLiteral("/C"),
-            QStringLiteral("start \"\" /wait %1").arg(uninstallCommand),
-        }
-    );
+    process.start(launch.program, launch.arguments);
     result.started = process.waitForStarted(10000);
     if (result.started) {
-        process.waitForFinished(-1);
-        result.completed = process.state() == QProcess::NotRunning;
+        const bool finished = process.waitForFinished(-1);
         result.exitCode = process.exitCode();
-        const QString processError = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
-        if (result.exitCode != 0) {
-            result.errors.push_back(processError.isEmpty()
+        const QString standardOutput = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
+        const QString standardError = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
+        const bool successfulExit = process.exitStatus() == QProcess::NormalExit
+            && (result.exitCode == 0 || result.exitCode == 1641 || result.exitCode == 3010);
+        if (!finished) {
+            result.errors.push_back(QStringLiteral("卸载程序未正常结束: %1").arg(app.name));
+        } else if (!successfulExit) {
+            const QString details = standardError.isEmpty() ? standardOutput : standardError;
+            result.errors.push_back(details.isEmpty()
                 ? QStringLiteral("卸载程序退出码 %1: %2").arg(result.exitCode).arg(app.name)
-                : processError);
+                : details);
+        } else if (!applicationRegistrationRemoved(app)) {
+            result.errors.push_back(QStringLiteral("卸载程序已结束，但系统仍检测到 %1。可能已取消卸载，或卸载器需要重启后完成。").arg(app.name));
+        } else {
+            result.completed = true;
         }
     }
 #else
@@ -279,7 +359,76 @@ UninstallResult SoftwareUninstallEngine::startUninstall(const InstalledApplicati
     return result;
 }
 
+UninstallProcessLaunch SoftwareUninstallEngine::buildProcessLaunch(const InstalledApplication& app) {
+    if (app.storeApp) {
+        if (app.packageFullName.trimmed().isEmpty()) {
+            return {};
+        }
+        return {
+            QStringLiteral("powershell.exe"),
+            {
+                QStringLiteral("-NoProfile"),
+                QStringLiteral("-NonInteractive"),
+                QStringLiteral("-ExecutionPolicy"),
+                QStringLiteral("Bypass"),
+                QStringLiteral("-Command"),
+                QStringLiteral("& { param([string]$Package) $ErrorActionPreference='Stop'; Remove-AppxPackage -Package $Package -Confirm:$false -ErrorAction Stop }"),
+                app.packageFullName,
+            },
+        };
+    }
+
+    const QString command = app.uninstallCommand.trimmed();
+    if (command.isEmpty()) {
+        return {};
+    }
+    if (commandNeedsShell(command)) {
+        return {
+            QStringLiteral("cmd.exe"),
+            {QStringLiteral("/D"), QStringLiteral("/S"), QStringLiteral("/C"), command},
+        };
+    }
+
+    QStringList parts;
+    if (!command.startsWith(QLatin1Char('"'))) {
+        static const QRegularExpression unquotedExecutable(
+            QStringLiteral("^\\s*(.+?\\.exe)(?:\\s+(.*))?$"),
+            QRegularExpression::CaseInsensitiveOption
+        );
+        const QRegularExpressionMatch match = unquotedExecutable.match(command);
+        if (match.hasMatch()) {
+            parts.push_back(match.captured(1));
+            parts.append(QProcess::splitCommand(match.captured(2)));
+        }
+    }
+    if (parts.isEmpty()) {
+        parts = QProcess::splitCommand(command);
+    }
+    if (parts.isEmpty()) {
+        return {};
+    }
+    UninstallProcessLaunch launch;
+    launch.program = parts.takeFirst();
+    launch.arguments = parts;
+    const QString executableName = QFileInfo(launch.program).fileName();
+    if (executableName.endsWith(QStringLiteral(".cmd"), Qt::CaseInsensitive)
+        || executableName.endsWith(QStringLiteral(".bat"), Qt::CaseInsensitive)) {
+        return {
+            QStringLiteral("cmd.exe"),
+            {QStringLiteral("/D"), QStringLiteral("/S"), QStringLiteral("/C"), command},
+        };
+    }
+    if (executableName.compare(QStringLiteral("msiexec"), Qt::CaseInsensitive) == 0
+        || executableName.compare(QStringLiteral("msiexec.exe"), Qt::CaseInsensitive) == 0) {
+        normalizeMsiArguments(&launch.arguments);
+    }
+    return launch;
+}
+
 QStringList SoftwareUninstallEngine::findResidualPaths(const InstalledApplication& app) const {
+    if (app.storeApp) {
+        return {};
+    }
     QStringList candidates;
     if (!app.installLocation.trimmed().isEmpty()) {
         candidates.push_back(QDir::toNativeSeparators(app.installLocation));

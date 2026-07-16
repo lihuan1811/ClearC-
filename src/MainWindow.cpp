@@ -18,6 +18,8 @@
 #include <QFont>
 #include <QFrame>
 #include <QGraphicsScene>
+#include <QGraphicsRectItem>
+#include <QGraphicsSceneHoverEvent>
 #include <QGraphicsTextItem>
 #include <QGraphicsView>
 #include <QGridLayout>
@@ -28,6 +30,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPen>
 #include <QProgressBar>
@@ -40,11 +43,13 @@
 #include <QStandardPaths>
 #include <QStorageInfo>
 #include <QStyle>
+#include <QStyleOptionGraphicsItem>
 #include <QTableWidgetItem>
 #include <QUrl>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <utility>
 
 namespace {
 
@@ -59,6 +64,9 @@ constexpr int CleanupRiskRole = Qt::UserRole + 23;
 constexpr int CleanupScanOnlyRole = Qt::UserRole + 24;
 constexpr int CleanupSizeRole = Qt::UserRole + 25;
 constexpr int CleanupFileCountRole = Qt::UserRole + 26;
+constexpr int TreemapPathData = 0;
+constexpr int TreemapExtensionData = 1;
+constexpr int TreemapSizeData = 2;
 const QString OptimizationStateKey = QStringLiteral("state/applied_optimizations");
 const QString GpuStateKey = QStringLiteral("state/applied_gpu_actions");
 
@@ -204,6 +212,70 @@ QColor extensionColor(const QString& extension) {
     return palette.at(static_cast<int>(seed % palette.size()));
 }
 
+class TreemapCellItem final : public QGraphicsRectItem {
+public:
+    TreemapCellItem(const QRectF& rect, const QColor& color)
+        : QGraphicsRectItem(rect), baseColor_(color) {
+        setBrush(baseColor_);
+        setPen(QPen(baseColor_.darker(150), 0));
+        setAcceptHoverEvents(true);
+        setFlag(QGraphicsItem::ItemIsSelectable, true);
+    }
+
+protected:
+    void hoverEnterEvent(QGraphicsSceneHoverEvent* event) override {
+        setBrush(baseColor_.lighter(120));
+        QGraphicsRectItem::hoverEnterEvent(event);
+    }
+
+    void hoverLeaveEvent(QGraphicsSceneHoverEvent* event) override {
+        setBrush(baseColor_);
+        QGraphicsRectItem::hoverLeaveEvent(event);
+    }
+
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override {
+        QGraphicsRectItem::paint(painter, option, widget);
+        if (isSelected()) {
+            painter->setBrush(Qt::NoBrush);
+            painter->setPen(QPen(Qt::white, 3));
+            painter->drawRect(rect().adjusted(2, 2, -2, -2));
+        }
+    }
+
+private:
+    QColor baseColor_;
+};
+
+class TreemapGraphicsView final : public QGraphicsView {
+public:
+    using ActivateHandler = std::function<void(const QString&)>;
+
+    TreemapGraphicsView(QGraphicsScene* scene, QWidget* parent)
+        : QGraphicsView(scene, parent) {}
+
+    void setActivateHandler(ActivateHandler handler) {
+        activateHandler_ = std::move(handler);
+    }
+
+protected:
+    void mouseDoubleClickEvent(QMouseEvent* event) override {
+        QGraphicsItem* current = itemAt(event->pos());
+        while (current && current->data(TreemapPathData).toString().isEmpty()) {
+            current = current->parentItem();
+        }
+        const QString path = current ? current->data(TreemapPathData).toString() : QString();
+        if (!path.isEmpty() && activateHandler_) {
+            activateHandler_(path);
+            event->accept();
+            return;
+        }
+        QGraphicsView::mouseDoubleClickEvent(event);
+    }
+
+private:
+    ActivateHandler activateHandler_;
+};
+
 qint64 treemapTotal(const QVector<FileUsageEntry>& entries, int first, int last) {
     qint64 total = 0;
     for (int i = first; i <= last; ++i) {
@@ -226,15 +298,22 @@ void drawTreemap(QGraphicsScene* scene, const QVector<FileUsageEntry>& entries, 
         }
         const QRectF cell = rect.adjusted(0.5, 0.5, -0.5, -0.5);
         const QColor color = extensionColor(entry.extension);
-        auto* rectangle = scene->addRect(cell, QPen(color.darker(150), 0), QBrush(color));
+        auto* rectangle = new TreemapCellItem(cell, color);
+        scene->addItem(rectangle);
+        if (first == last) {
+            rectangle->setData(TreemapPathData, entry.path);
+            rectangle->setData(TreemapExtensionData, entry.extension);
+            rectangle->setData(TreemapSizeData, entry.sizeBytes);
+        }
         rectangle->setToolTip(QStringLiteral("%1\n%2\n%3")
             .arg(QDir::toNativeSeparators(entry.path), CleanupEngine::formatSize(entry.sizeBytes), entry.extension));
         if (cell.width() > 105 && cell.height() > 42) {
             const QString name = QFileInfo(entry.path).fileName().isEmpty() ? entry.path : QFileInfo(entry.path).fileName();
-            auto* label = scene->addText(QStringLiteral("%1\n%2").arg(name, CleanupEngine::formatSize(entry.sizeBytes)));
+            auto* label = new QGraphicsTextItem(QStringLiteral("%1\n%2").arg(name, CleanupEngine::formatSize(entry.sizeBytes)), rectangle);
             label->setDefaultTextColor(Qt::white);
             label->setTextWidth(cell.width() - 8);
-            label->setPos(cell.left() + 4, cell.top() + 3);
+            label->setPos(4, 3);
+            label->setAcceptedMouseButtons(Qt::NoButton);
         }
         return;
     }
@@ -546,18 +625,39 @@ QWidget* MainWindow::createUninstallPage() {
         QStringLiteral("读取本地程序和微软商店应用；支持搜索、空间排序、批量卸载、注册表备份和残留清理。")
     ));
 
+    uninstallCategoryTabs_ = new QTabBar(page);
+    uninstallCategoryTabs_->setExpanding(false);
+    uninstallCategoryTabs_->setDrawBase(true);
+    uninstallCategoryTabs_->addTab(QStringLiteral("应用程序 (0)"));
+    uninstallCategoryTabs_->addTab(QStringLiteral("Windows 商城应用 (0)"));
+    connect(uninstallCategoryTabs_, &QTabBar::currentChanged, this, [this](int) {
+        filterInstalledApps(uninstallSearchEdit_ ? uninstallSearchEdit_->text() : QString());
+    });
+    layout->addWidget(uninstallCategoryTabs_);
+
     auto* actions = new QHBoxLayout();
     uninstallSearchEdit_ = new QLineEdit(page);
     uninstallSearchEdit_->setPlaceholderText(QStringLiteral("搜索软件名称、发布者或安装路径"));
-    auto* refresh = secondaryButton(QStringLiteral("刷新列表"));
-    auto* batch = primaryButton(QStringLiteral("批量卸载选中"));
+    uninstallRefreshButton_ = secondaryButton(QStringLiteral("刷新列表"));
+    uninstallBatchButton_ = primaryButton(QStringLiteral("批量卸载选中"));
     connect(uninstallSearchEdit_, &QLineEdit::textChanged, this, &MainWindow::filterInstalledApps);
-    connect(refresh, &QPushButton::clicked, this, &MainWindow::refreshInstalledApps);
-    connect(batch, &QPushButton::clicked, this, &MainWindow::uninstallSelectedApplications);
+    connect(uninstallRefreshButton_, &QPushButton::clicked, this, &MainWindow::refreshInstalledApps);
+    connect(uninstallBatchButton_, &QPushButton::clicked, this, &MainWindow::uninstallSelectedApplications);
     actions->addWidget(uninstallSearchEdit_, 1);
-    actions->addWidget(refresh);
-    actions->addWidget(batch);
+    actions->addWidget(uninstallRefreshButton_);
+    actions->addWidget(uninstallBatchButton_);
     layout->addLayout(actions);
+
+    auto* progressRow = new QHBoxLayout();
+    uninstallProgress_ = new QProgressBar(page);
+    uninstallProgress_->setRange(0, 0);
+    uninstallProgress_->setTextVisible(false);
+    uninstallProgress_->setMaximumWidth(180);
+    uninstallProgress_->setVisible(false);
+    uninstallStatusLabel_ = new QLabel(QStringLiteral("正在准备软件列表..."), page);
+    progressRow->addWidget(uninstallProgress_);
+    progressRow->addWidget(uninstallStatusLabel_, 1);
+    layout->addLayout(progressRow);
 
     uninstallTable_ = new QTableWidget(page);
     uninstallTable_->setColumnCount(10);
@@ -578,6 +678,14 @@ QWidget* MainWindow::createUninstallPage() {
         installedApps_ = uninstallWatcher_->result();
         populateUninstallTable();
         filterInstalledApps(uninstallSearchEdit_ ? uninstallSearchEdit_->text() : QString());
+        setUninstallBusy(false);
+        int desktopCount = 0;
+        for (const InstalledApplication& app : installedApps_) {
+            desktopCount += app.storeApp ? 0 : 1;
+        }
+        uninstallStatusLabel_->setText(QStringLiteral("读取完成：应用程序 %1 项，Windows 商城应用 %2 项")
+            .arg(desktopCount)
+            .arg(installedApps_.size() - desktopCount));
         showOperationLog(QStringLiteral("读取软件列表，共 %1 项").arg(installedApps_.size()));
     });
     return page;
@@ -607,9 +715,91 @@ QWidget* MainWindow::createOptimizePage() {
         QStringLiteral("办公稳定、电竞提帧、显卡专属和高级管控。所有可逆设置均提供日志与还原。")
     ));
 
+    optimizationProgress_ = new QProgressBar(page);
+    optimizationProgress_->setRange(0, 0);
+    optimizationProgress_->setTextVisible(false);
+    optimizationProgress_->setVisible(false);
+    layout->addWidget(optimizationProgress_);
+
     optimizationTabs_ = new QTabWidget(page);
 
-    auto createPresetPage = [this, page](
+    auto addSelectionTools = [this](
+        QVBoxLayout* targetLayout,
+        QTableWidget* table,
+        const QVector<WindowsOptimizationAction>& actions
+    ) {
+        auto* controls = new QHBoxLayout();
+        auto* category = new QComboBox(table);
+        category->addItem(QStringLiteral("全部分类"));
+        QSet<QString> categorySet;
+        for (const WindowsOptimizationAction& action : actions) {
+            categorySet.insert(action.category);
+        }
+        QStringList categories = categorySet.values();
+        categories.sort(Qt::CaseInsensitive);
+        category->addItems(categories);
+        auto* recommended = secondaryButton(QStringLiteral("推荐项"));
+        auto* selectAll = secondaryButton(QStringLiteral("全选当前分类"));
+        auto* selectNone = secondaryButton(QStringLiteral("全不选"));
+        auto* summary = new QLabel(table);
+        auto updateSummary = [table, summary] {
+            int selected = 0;
+            for (int row = 0; row < table->rowCount(); ++row) {
+                const QTableWidgetItem* check = table->item(row, 0);
+                selected += check && check->checkState() == Qt::Checked ? 1 : 0;
+            }
+            summary->setText(QStringLiteral("已勾选 %1 项").arg(selected));
+        };
+        connect(category, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [table, category](int index) {
+            const QString selectedCategory = index > 0 ? category->currentText() : QString();
+            for (int row = 0; row < table->rowCount(); ++row) {
+                const QTableWidgetItem* item = table->item(row, 1);
+                table->setRowHidden(row, !selectedCategory.isEmpty() && (!item || item->text() != selectedCategory));
+            }
+        });
+        connect(recommended, &QPushButton::clicked, this, [table, actions, updateSummary] {
+            for (int row = 0; row < table->rowCount(); ++row) {
+                QTableWidgetItem* check = table->item(row, 0);
+                const int index = check ? check->data(Qt::UserRole).toInt() : -1;
+                if (index >= 0 && index < actions.size()) {
+                    check->setCheckState(actions.at(index).recommended ? Qt::Checked : Qt::Unchecked);
+                }
+            }
+            updateSummary();
+        });
+        connect(selectAll, &QPushButton::clicked, this, [table, updateSummary] {
+            for (int row = 0; row < table->rowCount(); ++row) {
+                if (!table->isRowHidden(row) && table->item(row, 0)) {
+                    table->item(row, 0)->setCheckState(Qt::Checked);
+                }
+            }
+            updateSummary();
+        });
+        connect(selectNone, &QPushButton::clicked, this, [table, updateSummary] {
+            for (int row = 0; row < table->rowCount(); ++row) {
+                if (table->item(row, 0)) {
+                    table->item(row, 0)->setCheckState(Qt::Unchecked);
+                }
+            }
+            updateSummary();
+        });
+        connect(table, &QTableWidget::itemChanged, this, [updateSummary](QTableWidgetItem* item) {
+            if (item && item->column() == 0) {
+                updateSummary();
+            }
+        });
+        controls->addWidget(new QLabel(QStringLiteral("分类:"), table));
+        controls->addWidget(category);
+        controls->addWidget(recommended);
+        controls->addWidget(selectAll);
+        controls->addWidget(selectNone);
+        controls->addStretch();
+        controls->addWidget(summary);
+        targetLayout->addLayout(controls);
+        updateSummary();
+    };
+
+    auto createPresetPage = [this, page, addSelectionTools](
         const QString& description,
         QTableWidget** table,
         const QVector<WindowsOptimizationAction>& actions,
@@ -624,6 +814,7 @@ QWidget* MainWindow::createOptimizePage() {
         presetLayout->addWidget(label);
         *table = createOptimizationTable(presetPage);
         populateOptimizationTable(*table, actions);
+        addSelectionTools(presetLayout, *table, actions);
         presetLayout->addWidget(*table, 1);
         auto* apply = primaryButton(buttonText);
         connect(apply, &QPushButton::clicked, this, [this, table, actions, buttonText, deep] {
@@ -737,14 +928,33 @@ QWidget* MainWindow::createFilePage() {
     folderUsagePage_ = new QWidget(page);
     auto* usageLayout = new QVBoxLayout(folderUsagePage_);
     usageLayout->setContentsMargins(8, 8, 8, 8);
-    auto* scanUsage = primaryButton(QStringLiteral("扫描磁盘空间"));
-    connect(scanUsage, &QPushButton::clicked, this, &MainWindow::scanFolderUsage);
-    usageLayout->addWidget(scanUsage, 0, Qt::AlignLeft);
+    auto* usageActions = new QHBoxLayout();
+    folderUsageBackButton_ = secondaryButton(QStringLiteral("返回上级"));
+    folderUsageBackButton_->setEnabled(false);
+    folderUsageScanButton_ = primaryButton(QStringLiteral("扫描磁盘空间"));
+    folderUsagePathLabel_ = new QLabel(QDir::toNativeSeparators(fileRoot_), folderUsagePage_);
+    folderUsagePathLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    connect(folderUsageBackButton_, &QPushButton::clicked, this, &MainWindow::navigateFolderUsageBack);
+    connect(folderUsageScanButton_, &QPushButton::clicked, this, &MainWindow::scanFolderUsage);
+    usageActions->addWidget(folderUsageBackButton_);
+    usageActions->addWidget(folderUsageScanButton_);
+    usageActions->addWidget(new QLabel(QStringLiteral("当前目录:"), folderUsagePage_));
+    usageActions->addWidget(folderUsagePathLabel_, 1);
+    usageLayout->addLayout(usageActions);
     auto* usageSplitter = new QSplitter(Qt::Horizontal, folderUsagePage_);
     folderUsageTree_ = new QTreeWidget(folderUsagePage_);
     folderUsageTree_->setColumnCount(4);
     folderUsageTree_->setHeaderLabels({QStringLiteral("文件夹"), QStringLiteral("占用大小"), QStringLiteral("文件数"), QStringLiteral("百分比")});
     folderUsageTree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    connect(folderUsageTree_, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int) {
+        if (!item) {
+            return;
+        }
+        const QString path = item->data(0, PathRole).toString();
+        if (QFileInfo(path).isDir() && QDir::cleanPath(path) != QDir::cleanPath(folderUsageRoot_)) {
+            openFolderUsagePath(path);
+        }
+    });
     installTreeContextMenu(folderUsageTree_, 0);
     folderExtensionTable_ = new QTableWidget(folderUsagePage_);
     folderExtensionTable_->setColumnCount(6);
@@ -759,11 +969,58 @@ QWidget* MainWindow::createFilePage() {
     usageSplitter->setStretchFactor(1, 2);
     usageLayout->addWidget(usageSplitter, 2);
     folderUsageMapScene_ = new QGraphicsScene(folderUsagePage_);
-    folderUsageMapView_ = new QGraphicsView(folderUsageMapScene_, folderUsagePage_);
+    auto* treemapView = new TreemapGraphicsView(folderUsageMapScene_, folderUsagePage_);
+    treemapView->setActivateHandler([this](const QString& path) {
+        const QFileInfo info(path);
+        if (info.isDir()) {
+            openFolderUsagePath(path);
+        } else if (info.exists()) {
+            QDesktopServices::openUrl(QUrl::fromLocalFile(info.absolutePath()));
+        }
+    });
+    folderUsageMapView_ = treemapView;
     folderUsageMapView_->setObjectName(QStringLiteral("folderUsageTreemap"));
     folderUsageMapView_->setMinimumHeight(240);
     folderUsageMapView_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     folderUsageMapView_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    connect(folderUsageMapScene_, &QGraphicsScene::selectionChanged, this, [this] {
+        const QList<QGraphicsItem*> selected = folderUsageMapScene_->selectedItems();
+        if (selected.isEmpty()) {
+            return;
+        }
+        const QGraphicsItem* item = selected.first();
+        const QString path = item->data(TreemapPathData).toString();
+        const QString extension = item->data(TreemapExtensionData).toString();
+        const qint64 size = item->data(TreemapSizeData).toLongLong();
+        if (!path.isEmpty()) {
+            fileStatusLabel_->setText(QStringLiteral("已选择: %1  %2；双击打开所在目录")
+                .arg(QDir::toNativeSeparators(path), CleanupEngine::formatSize(size)));
+        }
+        for (int row = 0; row < folderExtensionTable_->rowCount(); ++row) {
+            if (folderExtensionTable_->item(row, 0)
+                && folderExtensionTable_->item(row, 0)->text() == extension) {
+                folderExtensionTable_->selectRow(row);
+                break;
+            }
+        }
+    });
+    connect(folderExtensionTable_, &QTableWidget::cellClicked, this, [this](int row, int) {
+        const QTableWidgetItem* extensionItem = folderExtensionTable_->item(row, 0);
+        if (!extensionItem) {
+            return;
+        }
+        const QString extension = extensionItem->text();
+        selectedTreemapExtension_ = selectedTreemapExtension_ == extension ? QString() : extension;
+        for (QGraphicsItem* item : folderUsageMapScene_->items()) {
+            const QString itemExtension = item->data(TreemapExtensionData).toString();
+            if (!itemExtension.isEmpty()) {
+                item->setOpacity(selectedTreemapExtension_.isEmpty() || itemExtension == selectedTreemapExtension_ ? 1.0 : 0.18);
+            }
+        }
+        fileStatusLabel_->setText(selectedTreemapExtension_.isEmpty()
+            ? QStringLiteral("已取消文件类型高亮。")
+            : QStringLiteral("已高亮 %1 文件；再次点击该类型可取消。").arg(selectedTreemapExtension_));
+    });
     usageLayout->addWidget(folderUsageMapView_, 3);
     fileTabs_->addTab(folderUsagePage_, QStringLiteral("磁盘可视化"));
 
@@ -776,11 +1033,11 @@ QWidget* MainWindow::createFilePage() {
     for (ManagedFileType type : types) {
         fileTypeCombo_->addItem(FileManagementEngine::typeLabel(type), static_cast<int>(type));
     }
-    auto* scanFiles = primaryButton(QStringLiteral("扫描文件"));
-    connect(scanFiles, &QPushButton::clicked, this, &MainWindow::scanManagedFiles);
+    managedFileScanButton_ = primaryButton(QStringLiteral("扫描文件"));
+    connect(managedFileScanButton_, &QPushButton::clicked, this, &MainWindow::scanManagedFiles);
     filterRow->addWidget(new QLabel(QStringLiteral("文件筛选:"), filesPage));
     filterRow->addWidget(fileTypeCombo_);
-    filterRow->addWidget(scanFiles);
+    filterRow->addWidget(managedFileScanButton_);
     filterRow->addStretch();
     filesLayout->addLayout(filterRow);
 
@@ -866,14 +1123,28 @@ QWidget* MainWindow::createFilePage() {
     layout->addWidget(fileTabs_, 1);
     fileStatusLabel_ = new QLabel(QStringLiteral("文件管理已就绪。"), page);
     fileStatusLabel_->setObjectName(QStringLiteral("statusStrip"));
-    layout->addWidget(fileStatusLabel_);
+    auto* fileStatusRow = new QHBoxLayout();
+    fileBusyProgress_ = new QProgressBar(page);
+    fileBusyProgress_->setRange(0, 0);
+    fileBusyProgress_->setTextVisible(false);
+    fileBusyProgress_->setMaximumWidth(180);
+    fileBusyProgress_->setVisible(false);
+    fileStatusRow->addWidget(fileBusyProgress_);
+    fileStatusRow->addWidget(fileStatusLabel_, 1);
+    layout->addLayout(fileStatusRow);
     folderUsageWatcher_ = new QFutureWatcher<FolderUsageScan>(this);
     connect(folderUsageWatcher_, &QFutureWatcher<FolderUsageScan>::finished, this, [this] {
+        folderUsageRoot_ = pendingFolderUsageRoot_;
+        if (folderUsagePathLabel_) {
+            folderUsagePathLabel_->setText(QDir::toNativeSeparators(folderUsageRoot_));
+        }
         populateFolderUsage(folderUsageWatcher_->result());
+        setFileLoading(false);
     });
     managedFileWatcher_ = new QFutureWatcher<QVector<ManagedFileEntry>>(this);
     connect(managedFileWatcher_, &QFutureWatcher<QVector<ManagedFileEntry>>::finished, this, [this] {
         populateManagedFiles(managedFileWatcher_->result());
+        setFileLoading(false);
     });
     return page;
 }
@@ -931,6 +1202,8 @@ void MainWindow::applyStyle() {
         QPushButton[nav="true"][active="true"] { background: rgba(255,255,255,0.22); }
         #primaryButton { background: #10a96f; color: white; font-weight: 600; }
         #secondaryButton { background: #e5f7ef; color: #06754f; font-weight: 600; }
+        #primaryButton:hover { background: #0d9864; }
+        #secondaryButton:hover { background: #d4f1e4; }
         #primaryButton:disabled, #secondaryButton:disabled { background: #e5e7eb; color: #8b949e; }
         #pageTitle { font-size: 23px; font-weight: 700; }
         #pageSubtitle { color: #526070; }
@@ -954,9 +1227,12 @@ void MainWindow::applyStyle() {
             background: white; border: 1px solid #cfd8d2; border-radius: 5px; padding: 3px;
         }
         QGraphicsView#folderUsageTreemap { background: #111827; border: 1px solid #9ca3af; border-radius: 2px; }
+        QProgressBar { min-height: 8px; max-height: 8px; border: 0; border-radius: 4px; background: #dce5e0; }
+        QProgressBar::chunk { border-radius: 4px; background: #10a96f; }
         QTabWidget::pane { border: 1px solid #cfd8d2; background: white; border-radius: 5px; }
-        QTabBar::tab { padding: 8px 12px; margin-right: 2px; }
-        QTabBar::tab:selected { color: #06754f; font-weight: 700; }
+        QTabBar::tab { padding: 8px 12px; margin-right: 2px; background: #edf2ef; border: 1px solid #d6dfda; }
+        QTabBar::tab:hover { background: #e1f3ea; }
+        QTabBar::tab:selected { color: #06754f; background: white; border-bottom: 2px solid #10a96f; font-weight: 700; }
     )"));
 }
 
@@ -1713,14 +1989,44 @@ void MainWindow::openBackupManager() {
 }
 
 void MainWindow::refreshInstalledApps() {
-    if (!uninstallTable_ || !uninstallWatcher_ || uninstallWatcher_->isRunning()) {
+    if (!uninstallTable_ || !uninstallWatcher_ || uninstallWatcher_->isRunning() || uninstallBusy_) {
         return;
     }
-    globalStatusLabel_->setText(QStringLiteral("正在读取本地软件和微软商店应用..."));
+    setUninstallBusy(true, QStringLiteral("正在读取应用程序和 Windows 商城应用..."));
     uninstallTable_->setRowCount(0);
     uninstallWatcher_->setFuture(QtConcurrent::run([] {
         return SoftwareUninstallEngine().installedApplications();
     }));
+}
+
+void MainWindow::setUninstallBusy(bool busy, const QString& message) {
+    uninstallBusy_ = busy;
+    if (uninstallProgress_) {
+        uninstallProgress_->setVisible(busy);
+    }
+    if (uninstallCategoryTabs_) {
+        uninstallCategoryTabs_->setEnabled(!busy);
+    }
+    if (uninstallSearchEdit_) {
+        uninstallSearchEdit_->setEnabled(!busy);
+    }
+    if (uninstallRefreshButton_) {
+        uninstallRefreshButton_->setEnabled(!busy);
+    }
+    if (uninstallBatchButton_) {
+        uninstallBatchButton_->setEnabled(!busy);
+    }
+    if (uninstallTable_) {
+        uninstallTable_->setEnabled(!busy);
+    }
+    if (!message.isEmpty()) {
+        if (uninstallStatusLabel_) {
+            uninstallStatusLabel_->setText(message);
+        }
+        if (globalStatusLabel_) {
+            globalStatusLabel_->setText(message);
+        }
+    }
 }
 
 void MainWindow::populateUninstallTable() {
@@ -1746,7 +2052,10 @@ void MainWindow::populateUninstallTable() {
         auto* normal = secondaryButton(QStringLiteral("卸载"));
         auto* strong = primaryButton(QStringLiteral("强力"));
         normal->setEnabled(!app.uninstallCommand.isEmpty());
-        strong->setEnabled(!app.uninstallCommand.isEmpty());
+        strong->setEnabled(!app.storeApp && !app.uninstallCommand.isEmpty());
+        if (app.storeApp) {
+            strong->setToolTip(QStringLiteral("Windows 商城应用仅使用官方 Appx 卸载，不直接删除 WindowsApps 目录。"));
+        }
         connect(normal, &QPushButton::clicked, this, [this, i] { uninstallApplication(i, false); });
         connect(strong, &QPushButton::clicked, this, [this, i] { uninstallApplication(i, true); });
         uninstallTable_->setCellWidget(row, 8, normal);
@@ -1754,6 +2063,14 @@ void MainWindow::populateUninstallTable() {
         setTableRowMetadata(uninstallTable_, row, QStringLiteral("卸载 %1；卸载前自动备份注册表，完成后可扫描残留。").arg(app.name), QStringLiteral("谨慎"), app.installLocation, app.uninstallCommand, QStringLiteral("uninstall:%1").arg(i));
     }
     uninstallTable_->setSortingEnabled(true);
+    if (uninstallCategoryTabs_) {
+        int desktopCount = 0;
+        for (const InstalledApplication& app : installedApps_) {
+            desktopCount += app.storeApp ? 0 : 1;
+        }
+        uninstallCategoryTabs_->setTabText(0, QStringLiteral("应用程序 (%1)").arg(desktopCount));
+        uninstallCategoryTabs_->setTabText(1, QStringLiteral("Windows 商城应用 (%1)").arg(installedApps_.size() - desktopCount));
+    }
 }
 
 void MainWindow::filterInstalledApps(const QString& text) {
@@ -1761,6 +2078,7 @@ void MainWindow::filterInstalledApps(const QString& text) {
         return;
     }
     const QString query = text.trimmed();
+    const bool showStoreApps = uninstallCategoryTabs_ && uninstallCategoryTabs_->currentIndex() == 1;
     for (int row = 0; row < uninstallTable_->rowCount(); ++row) {
         QString content;
         for (int column : {1, 4, 7}) {
@@ -1768,12 +2086,17 @@ void MainWindow::filterInstalledApps(const QString& text) {
                 content += QLatin1Char(' ') + item->text();
             }
         }
-        uninstallTable_->setRowHidden(row, !query.isEmpty() && !content.contains(query, Qt::CaseInsensitive));
+        const QTableWidgetItem* check = uninstallTable_->item(row, 0);
+        const int appIndex = check ? check->data(AppIndexRole).toInt() : -1;
+        const bool categoryMatches = appIndex >= 0 && appIndex < installedApps_.size()
+            && installedApps_.at(appIndex).storeApp == showStoreApps;
+        const bool queryMatches = query.isEmpty() || content.contains(query, Qt::CaseInsensitive);
+        uninstallTable_->setRowHidden(row, !categoryMatches || !queryMatches);
     }
 }
 
 void MainWindow::uninstallApplication(int appIndex, bool strong) {
-    if (appIndex < 0 || appIndex >= installedApps_.size()) {
+    if (uninstallBusy_ || appIndex < 0 || appIndex >= installedApps_.size()) {
         return;
     }
     const InstalledApplication app = installedApps_.at(appIndex);
@@ -1783,7 +2106,7 @@ void MainWindow::uninstallApplication(int appIndex, bool strong) {
     if (!confirmAction(this, strong ? QStringLiteral("强力粉碎卸载") : QStringLiteral("常规卸载"), QStringLiteral("%1\n\n软件: %2").arg(prompt, app.name))) {
         return;
     }
-    globalStatusLabel_->setText(QStringLiteral("正在等待卸载完成: %1").arg(app.name));
+    setUninstallBusy(true, QStringLiteral("正在等待卸载完成: %1").arg(app.name));
     auto* watcher = new QFutureWatcher<UninstallResult>(this);
     connect(watcher, &QFutureWatcher<UninstallResult>::finished, this, [this, watcher, app, strong] {
         const UninstallResult result = watcher->result();
@@ -1791,13 +2114,20 @@ void MainWindow::uninstallApplication(int appIndex, bool strong) {
             .arg(strong ? QStringLiteral("强力卸载") : QStringLiteral("常规卸载"), app.name)
             .arg(result.exitCode)
             .arg(result.registryBackup));
+        setUninstallBusy(false);
         if (!result.errors.isEmpty()) {
             QMessageBox::warning(this, QStringLiteral("软件卸载"), result.errors.join(QStringLiteral("\n")));
         } else if (result.completed) {
-            cleanApplicationResiduals(app);
+            if (strong) {
+                cleanApplicationResiduals(app);
+            } else {
+                QMessageBox::information(this, QStringLiteral("软件卸载"), QStringLiteral("已确认卸载完成: %1").arg(app.name));
+            }
         }
         watcher->deleteLater();
-        refreshInstalledApps();
+        if (!strong || !result.completed || !uninstallBusy_) {
+            refreshInstalledApps();
+        }
     });
     watcher->setFuture(QtConcurrent::run([app] {
         return SoftwareUninstallEngine().startUninstall(app);
@@ -1805,10 +2135,13 @@ void MainWindow::uninstallApplication(int appIndex, bool strong) {
 }
 
 void MainWindow::uninstallSelectedApplications() {
+    if (uninstallBusy_) {
+        return;
+    }
     QVector<int> indexes;
     for (int row = 0; row < uninstallTable_->rowCount(); ++row) {
         QTableWidgetItem* check = uninstallTable_->item(row, 0);
-        if (check && check->checkState() == Qt::Checked) {
+        if (!uninstallTable_->isRowHidden(row) && check && check->checkState() == Qt::Checked) {
             indexes.push_back(check->data(AppIndexRole).toInt());
         }
     }
@@ -1825,10 +2158,11 @@ void MainWindow::uninstallSelectedApplications() {
             applications.push_back(installedApps_.at(index));
         }
     }
-    globalStatusLabel_->setText(QStringLiteral("正在依次卸载 %1 个软件...").arg(applications.size()));
+    setUninstallBusy(true, QStringLiteral("正在依次卸载 %1 个软件...").arg(applications.size()));
     auto* watcher = new QFutureWatcher<BatchUninstallResult>(this);
     connect(watcher, &QFutureWatcher<BatchUninstallResult>::finished, this, [this, watcher] {
         const BatchUninstallResult result = watcher->result();
+        setUninstallBusy(false);
         showOperationLog(QStringLiteral("批量卸载完成 %1 项，错误 %2 项")
             .arg(result.completed)
             .arg(result.errors.size()));
@@ -1840,9 +2174,6 @@ void MainWindow::uninstallSelectedApplications() {
                 .arg(result.errors.size())
                 .arg(result.errors.join(QStringLiteral("\n")))
         );
-        if (!result.completedApplications.isEmpty()) {
-            cleanApplicationResidualsBatch(result.completedApplications);
-        }
         watcher->deleteLater();
         refreshInstalledApps();
     });
@@ -1870,6 +2201,7 @@ void MainWindow::cleanApplicationResiduals(const InstalledApplication& app) {
     const QStringList residuals = uninstallEngine_.findResidualPaths(app);
     if (residuals.isEmpty()) {
         showOperationLog(QStringLiteral("卸载残留扫描完成: %1，无残留").arg(app.name));
+        QMessageBox::information(this, QStringLiteral("强力卸载"), QStringLiteral("已确认卸载完成，未发现可清理残留: %1").arg(app.name));
         return;
     }
     if (!confirmAction(
@@ -1880,10 +2212,11 @@ void MainWindow::cleanApplicationResiduals(const InstalledApplication& app) {
         )) {
         return;
     }
-    globalStatusLabel_->setText(QStringLiteral("正在清理卸载残留: %1").arg(app.name));
+    setUninstallBusy(true, QStringLiteral("正在清理卸载残留: %1").arg(app.name));
     auto* watcher = new QFutureWatcher<UninstallResult>(this);
     connect(watcher, &QFutureWatcher<UninstallResult>::finished, this, [this, watcher, app] {
         const UninstallResult result = watcher->result();
+        setUninstallBusy(false);
         showOperationLog(QStringLiteral("清理卸载残留: %1，删除 %2，失败 %3").arg(app.name).arg(result.removedPaths.size()).arg(result.errors.size()));
         const QString message = QStringLiteral("删除 %1 项，失败 %2 项。\n%3")
             .arg(result.removedPaths.size())
@@ -1989,7 +2322,23 @@ void MainWindow::populateOptimizationTable(QTableWidget* table, const QVector<Wi
     }
 }
 
+void MainWindow::setOptimizationBusy(bool busy, const QString& message) {
+    optimizationBusy_ = busy;
+    if (optimizationProgress_) {
+        optimizationProgress_->setVisible(busy);
+    }
+    if (optimizationTabs_) {
+        optimizationTabs_->setEnabled(!busy);
+    }
+    if (!message.isEmpty() && globalStatusLabel_) {
+        globalStatusLabel_->setText(message);
+    }
+}
+
 void MainWindow::runOptimizationAction(const WindowsOptimizationAction& action, bool revert) {
+    if (optimizationBusy_) {
+        return;
+    }
     const QVector<WindowsOptimizationCommand> commands = revert ? action.revertCommands : action.commands;
     if (commands.isEmpty()) {
         return;
@@ -2002,15 +2351,13 @@ void MainWindow::runOptimizationAction(const WindowsOptimizationAction& action, 
         )) {
         return;
     }
-    globalStatusLabel_->setText(QStringLiteral("正在%1: %2").arg(revert ? QStringLiteral("还原") : QStringLiteral("执行"), action.title));
-    if (!revert && !action.revertCommands.isEmpty()) {
-        setActionApplied(OptimizationStateKey, action.id, true);
-    }
+    setOptimizationBusy(true, QStringLiteral("正在%1: %2").arg(revert ? QStringLiteral("还原") : QStringLiteral("执行"), action.title));
     auto* watcher = new QFutureWatcher<CommandBatchResult>(this);
     connect(watcher, &QFutureWatcher<CommandBatchResult>::finished, this, [this, watcher, action, revert] {
         const CommandBatchResult result = watcher->result();
+        setOptimizationBusy(false);
         const int exitCode = result.exitCodes.value(action.id, -1);
-        if (exitCode == 0 && revert) {
+        if (exitCode == 0 && !action.revertCommands.isEmpty()) {
             setActionApplied(OptimizationStateKey, action.id, !revert);
         }
         showOperationLog(QStringLiteral("%1优化项 %2，退出码 %3").arg(revert ? QStringLiteral("还原") : QStringLiteral("执行"), action.title).arg(exitCode));
@@ -2032,6 +2379,9 @@ void MainWindow::applyOptimizationPreset(
     const QString& title,
     bool deep
 ) {
+    if (optimizationBusy_) {
+        return;
+    }
     QVector<WindowsOptimizationAction> selected;
     for (int row = 0; row < table->rowCount(); ++row) {
         QTableWidgetItem* check = table->item(row, 0);
@@ -2046,23 +2396,24 @@ void MainWindow::applyOptimizationPreset(
         QMessageBox::information(this, title, QStringLiteral("没有勾选优化项。"));
         return;
     }
-    const QString notice = deep
-        ? QStringLiteral("电竞模式会限制通知、搜索、休眠、系统还原等办公功能。")
-        : QStringLiteral("办公模式只执行当前勾选的稳定优化项。");
+    const QString notice = title.contains(QStringLiteral("高级"))
+        ? QStringLiteral("高级优化包含系统服务和安全相关设置，将逐项记录原状态；请确认已理解每项风险。")
+        : (deep
+            ? QStringLiteral("电竞模式会限制通知、搜索、休眠、系统还原等办公功能。")
+            : QStringLiteral("办公模式只执行当前勾选的稳定优化项。"));
     if (!confirmAction(this, title, QStringLiteral("%1\n\n将执行 %2 项，是否继续？").arg(notice).arg(selected.size()))) {
         return;
     }
-    globalStatusLabel_->setText(QStringLiteral("正在执行: %1").arg(title));
-    for (const WindowsOptimizationAction& action : selected) {
-        if (!action.revertCommands.isEmpty()) {
-            setActionApplied(OptimizationStateKey, action.id, true);
-        }
-    }
+    setOptimizationBusy(true, QStringLiteral("正在执行: %1").arg(title));
     auto* watcher = new QFutureWatcher<CommandBatchResult>(this);
     connect(watcher, &QFutureWatcher<CommandBatchResult>::finished, this, [this, watcher, selected, title] {
         const CommandBatchResult result = watcher->result();
+        setOptimizationBusy(false);
         for (const WindowsOptimizationAction& action : selected) {
             const int exitCode = result.exitCodes.value(action.id, -1);
+            if (exitCode == 0 && !action.revertCommands.isEmpty()) {
+                setActionApplied(OptimizationStateKey, action.id, true);
+            }
             showOperationLog(QStringLiteral("%1: %2，退出码 %3").arg(title, action.title).arg(exitCode));
         }
         QMessageBox::information(this, title, result.output.left(12000));
@@ -2083,9 +2434,10 @@ void MainWindow::applyOptimizationPreset(
 }
 
 void MainWindow::refreshGpuInfo() {
-    if (!gpuInfoTable_ || !gpuActionTable_ || !gpuWatcher_ || gpuWatcher_->isRunning()) {
+    if (optimizationBusy_ || !gpuInfoTable_ || !gpuActionTable_ || !gpuWatcher_ || gpuWatcher_->isRunning()) {
         return;
     }
+    setOptimizationBusy(true, QStringLiteral("正在检测显卡与官方支持入口..."));
     gpuLog_->append(QStringLiteral("[%1] 正在检测显卡与官方支持入口...")
         .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"))));
     gpuWatcher_->setFuture(QtConcurrent::run([] {
@@ -2120,6 +2472,7 @@ void MainWindow::finishGpuRefresh() {
             .arg(gpuDevices_.size())
             .arg(gpuActions_.size()));
     }
+    setOptimizationBusy(false);
 }
 
 void MainWindow::populateGpuActions() {
@@ -2148,7 +2501,7 @@ void MainWindow::populateGpuActions() {
 }
 
 void MainWindow::runGpuAction(int actionIndex, bool revert) {
-    if (actionIndex < 0 || actionIndex >= gpuActions_.size()) {
+    if (optimizationBusy_ || actionIndex < 0 || actionIndex >= gpuActions_.size()) {
         return;
     }
     const GpuOptimizationAction action = gpuActions_.at(actionIndex);
@@ -2163,16 +2516,14 @@ void MainWindow::runGpuAction(int actionIndex, bool revert) {
         )) {
         return;
     }
-    globalStatusLabel_->setText(QStringLiteral("正在%1: %2").arg(revert ? QStringLiteral("还原") : QStringLiteral("执行"), action.title));
-    if (!revert && !action.revertCommands.isEmpty()) {
-        setActionApplied(GpuStateKey, action.id, true);
-    }
+    setOptimizationBusy(true, QStringLiteral("正在%1: %2").arg(revert ? QStringLiteral("还原") : QStringLiteral("执行"), action.title));
     auto* watcher = new QFutureWatcher<CommandBatchResult>(this);
     connect(watcher, &QFutureWatcher<CommandBatchResult>::finished, this, [this, watcher, action, revert] {
         const CommandBatchResult result = watcher->result();
+        setOptimizationBusy(false);
         const int exitCode = result.exitCodes.value(action.id, -1);
-        if (exitCode == 0 && revert) {
-            setActionApplied(GpuStateKey, action.id, false);
+        if (exitCode == 0 && !action.revertCommands.isEmpty()) {
+            setActionApplied(GpuStateKey, action.id, !revert);
         }
         const QString log = QStringLiteral("%1显卡操作 %2，退出码 %3").arg(revert ? QStringLiteral("还原") : QStringLiteral("执行"), action.title).arg(exitCode);
         gpuLog_->append(log);
@@ -2228,6 +2579,15 @@ void MainWindow::selectDiskRoot(const QString& rootPath) {
         return;
     }
     fileRoot_ = QDir::cleanPath(rootPath);
+    folderUsageRoot_ = fileRoot_;
+    pendingFolderUsageRoot_ = fileRoot_;
+    folderUsageHistory_.clear();
+    if (folderUsagePathLabel_) {
+        folderUsagePathLabel_->setText(QDir::toNativeSeparators(folderUsageRoot_));
+    }
+    if (folderUsageBackButton_) {
+        folderUsageBackButton_->setEnabled(false);
+    }
     QStorageInfo storage(fileRoot_);
     storage.refresh();
     const qint64 used = qMax<qint64>(0, storage.bytesTotal() - storage.bytesAvailable());
@@ -2252,11 +2612,72 @@ void MainWindow::scanFolderUsage() {
         QMessageBox::information(this, QStringLiteral("磁盘扫描"), QStringLiteral("空间扫描正在进行，请等待完成。"));
         return;
     }
-    const QString root = fileRoot_.isEmpty() ? defaultDiskRoot() : fileRoot_;
-    fileStatusLabel_->setText(QStringLiteral("正在扫描空间占用: %1").arg(QDir::toNativeSeparators(root)));
+    const QString root = folderUsageRoot_.isEmpty()
+        ? (fileRoot_.isEmpty() ? defaultDiskRoot() : fileRoot_)
+        : folderUsageRoot_;
+    scanFolderUsagePath(root);
+}
+
+void MainWindow::scanFolderUsagePath(const QString& rootPath) {
+    if (!folderUsageWatcher_ || folderUsageWatcher_->isRunning() || !QFileInfo(rootPath).isDir()) {
+        return;
+    }
+    const QString root = QDir::cleanPath(QFileInfo(rootPath).absoluteFilePath());
+    pendingFolderUsageRoot_ = root;
+    setFileLoading(true, QStringLiteral("正在扫描空间占用: %1").arg(QDir::toNativeSeparators(root)));
     folderUsageWatcher_->setFuture(QtConcurrent::run([root] {
         return FileManagementEngine().scanFolderUsageDetailed(root, 80, 60000);
     }));
+}
+
+void MainWindow::openFolderUsagePath(const QString& rootPath) {
+    if (!folderUsageWatcher_ || folderUsageWatcher_->isRunning() || !QFileInfo(rootPath).isDir()) {
+        return;
+    }
+    const QString target = QDir::cleanPath(QFileInfo(rootPath).absoluteFilePath());
+    if (!folderUsageRoot_.isEmpty() && QDir::cleanPath(folderUsageRoot_) != target) {
+        folderUsageHistory_.push_back(folderUsageRoot_);
+    }
+    if (folderUsageBackButton_) {
+        folderUsageBackButton_->setEnabled(!folderUsageHistory_.isEmpty());
+    }
+    scanFolderUsagePath(target);
+}
+
+void MainWindow::navigateFolderUsageBack() {
+    if (folderUsageHistory_.isEmpty() || (folderUsageWatcher_ && folderUsageWatcher_->isRunning())) {
+        return;
+    }
+    const QString target = folderUsageHistory_.takeLast();
+    if (folderUsageBackButton_) {
+        folderUsageBackButton_->setEnabled(!folderUsageHistory_.isEmpty());
+    }
+    scanFolderUsagePath(target);
+}
+
+void MainWindow::setFileLoading(bool loading, const QString& message) {
+    fileLoadingCount_ = qMax(0, fileLoadingCount_ + (loading ? 1 : -1));
+    const bool busy = fileLoadingCount_ > 0;
+    if (fileBusyProgress_) {
+        fileBusyProgress_->setVisible(busy);
+    }
+    if (folderUsageScanButton_) {
+        folderUsageScanButton_->setEnabled(!busy);
+    }
+    if (folderUsageBackButton_) {
+        folderUsageBackButton_->setEnabled(!busy && !folderUsageHistory_.isEmpty());
+    }
+    if (managedFileScanButton_) {
+        managedFileScanButton_->setEnabled(!busy);
+    }
+    if (!message.isEmpty()) {
+        if (fileStatusLabel_) {
+            fileStatusLabel_->setText(message);
+        }
+        if (globalStatusLabel_) {
+            globalStatusLabel_->setText(message);
+        }
+    }
 }
 
 void MainWindow::scanManagedFiles() {
@@ -2265,7 +2686,7 @@ void MainWindow::scanManagedFiles() {
     }
     const QString root = fileRoot_.isEmpty() ? defaultDiskRoot() : fileRoot_;
     const ManagedFileType type = static_cast<ManagedFileType>(fileTypeCombo_->currentData().toInt());
-    fileStatusLabel_->setText(QStringLiteral("正在扫描%1文件...").arg(FileManagementEngine::typeLabel(type)));
+    setFileLoading(true, QStringLiteral("正在扫描%1文件...").arg(FileManagementEngine::typeLabel(type)));
     managedFileWatcher_->setFuture(QtConcurrent::run([root, type] {
         return FileManagementEngine().listFiles(root, type, 5000);
     }));
@@ -2315,11 +2736,12 @@ void MainWindow::runFileOperationAsync(
         return;
     }
     fileOperationRunning_ = true;
-    fileStatusLabel_->setText(QStringLiteral("正在执行: %1").arg(title));
+    setFileLoading(true, QStringLiteral("正在执行: %1").arg(title));
     auto* watcher = new QFutureWatcher<FileOperationResult>(this);
     connect(watcher, &QFutureWatcher<FileOperationResult>::finished, this, [this, watcher, title, completed] {
         const FileOperationResult result = watcher->result();
         fileOperationRunning_ = false;
+        setFileLoading(false);
         fileStatusLabel_->setText(QStringLiteral("%1完成: 成功 %2，失败 %3")
             .arg(title)
             .arg(result.affectedPaths.size())
@@ -2449,14 +2871,28 @@ void MainWindow::populateFolderUsage(const FolderUsageScan& scan) {
         total += entry.sizeBytes;
         totalFileCount += entry.fileCount;
     }
+    auto* rootRow = new QTreeWidgetItem(folderUsageTree_);
+    rootRow->setText(0, QDir::toNativeSeparators(folderUsageRoot_));
+    rootRow->setText(1, CleanupEngine::formatSize(total));
+    rootRow->setText(2, QString::number(totalFileCount));
+    rootRow->setText(3, total > 0 ? QStringLiteral("100.0%") : QStringLiteral("--"));
+    rootRow->setData(0, PathRole, folderUsageRoot_);
+    rootRow->setToolTip(0, QStringLiteral("当前扫描目录；双击下级目录可继续查看。"));
     for (const FolderUsageEntry& entry : scan.folders) {
-        auto* row = new QTreeWidgetItem(folderUsageTree_);
+        auto* row = new QTreeWidgetItem(rootRow);
         row->setText(0, QDir::toNativeSeparators(entry.path));
         row->setText(1, CleanupEngine::formatSize(entry.sizeBytes));
         row->setText(2, QString::number(entry.fileCount));
         row->setText(3, total > 0 ? QStringLiteral("%1%").arg(entry.sizeBytes * 100.0 / total, 0, 'f', 1) : QStringLiteral("--"));
+        row->setData(0, PathRole, entry.path);
         row->setToolTip(0, QStringLiteral("功能说明: 文件夹占用排行\n适用场景: 定位空间占用\n风险等级: 只读"));
     }
+    rootRow->setExpanded(true);
+    folderUsageTree_->setCurrentItem(rootRow);
+    if (folderUsageBackButton_) {
+        folderUsageBackButton_->setEnabled(!folderUsageHistory_.isEmpty());
+    }
+    selectedTreemapExtension_.clear();
     populateExtensionUsageTable(scan.extensions, total);
     populateFolderUsageTreemap(scan.files, total, totalFileCount);
     fileStatusLabel_->setText(QStringLiteral("空间扫描完成: %1 个目录，%2 个文件").arg(scan.folders.size()).arg(totalFileCount));

@@ -1,5 +1,6 @@
 #include "CleanupEngine.h"
 #include "FileManagementEngine.h"
+#include "SoftwareUninstallEngine.h"
 #include "SystemCatalog.h"
 
 #include <QCoreApplication>
@@ -128,6 +129,62 @@ bool folderScanRetainsOnlyLargestRequestedFiles() {
         && require(scan.files.at(0).sizeBytes == 10, QStringLiteral("largest file is retained"))
         && require(scan.files.at(2).sizeBytes == 8, QStringLiteral("third-largest file is retained"))
         && require(countedFiles == 10, QStringLiteral("extension totals still include every file"));
+}
+
+bool uninstallCommandsUseReliableProcessLaunches() {
+    InstalledApplication desktop;
+    desktop.uninstallCommand = QStringLiteral("\"C:\\Program Files\\Acme\\uninstall.exe\" /S");
+    const UninstallProcessLaunch desktopLaunch = SoftwareUninstallEngine::buildProcessLaunch(desktop);
+    if (!require(
+            desktopLaunch.program == QStringLiteral("C:\\Program Files\\Acme\\uninstall.exe"),
+            QStringLiteral("quoted desktop uninstaller launches directly")
+        )
+        || !require(desktopLaunch.arguments == QStringList{QStringLiteral("/S")}, QStringLiteral("desktop uninstaller arguments are preserved"))) {
+        return false;
+    }
+
+    InstalledApplication unquotedDesktop;
+    unquotedDesktop.uninstallCommand = QStringLiteral("C:\\Program Files\\Legacy App\\remove.exe /silent");
+    const UninstallProcessLaunch unquotedLaunch = SoftwareUninstallEngine::buildProcessLaunch(unquotedDesktop);
+    if (!require(unquotedLaunch.program == QStringLiteral("C:\\Program Files\\Legacy App\\remove.exe"), QStringLiteral("legacy unquoted uninstall paths are repaired"))
+        || !require(unquotedLaunch.arguments == QStringList{QStringLiteral("/silent")}, QStringLiteral("legacy unquoted uninstall arguments are preserved"))) {
+        return false;
+    }
+
+    InstalledApplication msi;
+    msi.uninstallCommand = QStringLiteral("MsiExec.exe /I{01234567-89AB-CDEF-0123-456789ABCDEF} /qn");
+    const UninstallProcessLaunch msiLaunch = SoftwareUninstallEngine::buildProcessLaunch(msi);
+    if (!require(msiLaunch.program.compare(QStringLiteral("MsiExec.exe"), Qt::CaseInsensitive) == 0, QStringLiteral("MSI executable is retained"))
+        || !require(msiLaunch.arguments.contains(QStringLiteral("/X{01234567-89AB-CDEF-0123-456789ABCDEF}")), QStringLiteral("MSI install mode is converted to uninstall mode"))) {
+        return false;
+    }
+
+    InstalledApplication store;
+    store.storeApp = true;
+    store.packageFullName = QStringLiteral("Contoso.App_1.0.0.0_x64__publisher");
+    const UninstallProcessLaunch storeLaunch = SoftwareUninstallEngine::buildProcessLaunch(store);
+    if (!require(storeLaunch.program.compare(QStringLiteral("powershell.exe"), Qt::CaseInsensitive) == 0, QStringLiteral("Store apps use PowerShell directly"))
+        || !require(storeLaunch.arguments.join(QLatin1Char(' ')).contains(QStringLiteral("Remove-AppxPackage")), QStringLiteral("Store app launch removes the selected package"))
+        || !require(storeLaunch.arguments.last() == store.packageFullName, QStringLiteral("Store package identity is passed without shell quoting"))) {
+        return false;
+    }
+
+    InstalledApplication shell;
+    shell.uninstallCommand = QStringLiteral("helper.exe /remove && cleanup.exe");
+    const UninstallProcessLaunch shellLaunch = SoftwareUninstallEngine::buildProcessLaunch(shell);
+    return require(shellLaunch.program.compare(QStringLiteral("cmd.exe"), Qt::CaseInsensitive) == 0, QStringLiteral("shell expressions use cmd.exe"))
+        && require(shellLaunch.arguments.contains(QStringLiteral("/C")), QStringLiteral("shell expressions are executed through cmd /C"));
+}
+
+bool storeAppResidualCleanupDoesNotTouchWindowsApps() {
+    InstalledApplication store;
+    store.name = QStringLiteral("Contoso App");
+    store.storeApp = true;
+    store.installLocation = QStringLiteral("C:\\Program Files\\WindowsApps\\Contoso.App_1.0.0.0_x64__publisher");
+    return require(
+        SoftwareUninstallEngine().findResidualPaths(store).isEmpty(),
+        QStringLiteral("Store app residual cleanup never removes WindowsApps package directories")
+    );
 }
 
 bool ordinaryMigrationCreatesShortcutAndHandlesQuotes() {
@@ -296,6 +353,33 @@ bool criticalOptimizationActionsProvideInverseOperations() {
     return require(found == required, QStringLiteral("all critical reversible optimizations are present"));
 }
 
+bool safeOptimizationCatalogIsCategorizedAndReversible() {
+    const QSet<QString> required = {
+        QStringLiteral("office_explorer_extensions"),
+        QStringLiteral("office_quick_access_history"),
+        QStringLiteral("office_advertising_id"),
+        QStringLiteral("office_game_capture"),
+        QStringLiteral("office_edge_background"),
+    };
+    QSet<QString> found;
+    QSet<QString> ids;
+    for (const WindowsOptimizationAction& action : SystemCatalog::officeOptimizationActions()) {
+        if (!require(!ids.contains(action.id), QStringLiteral("office optimization id is unique: %1").arg(action.id))
+            || !require(!action.category.isEmpty(), QStringLiteral("office optimization is categorized: %1").arg(action.id))
+            || !require(!action.commands.isEmpty(), QStringLiteral("office optimization has a real operation: %1").arg(action.id))) {
+            return false;
+        }
+        ids.insert(action.id);
+        if (required.contains(action.id)) {
+            found.insert(action.id);
+            if (!require(!action.revertCommands.isEmpty(), QStringLiteral("new optimization is reversible: %1").arg(action.id))) {
+                return false;
+            }
+        }
+    }
+    return require(found == required, QStringLiteral("all independently implemented optimization categories are present"));
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -305,10 +389,13 @@ int main(int argc, char* argv[]) {
         && pruningKeepsNewestBackups()
         && batchRenamePreservesExtensions()
         && folderScanRetainsOnlyLargestRequestedFiles()
+        && uninstallCommandsUseReliableProcessLaunches()
+        && storeAppResidualCleanupDoesNotTouchWindowsApps()
         && ordinaryMigrationCreatesShortcutAndHandlesQuotes()
         && detailedCleanupCatalogUsesSafeDefaults()
         && selectedRuleScanDoesNotRunTheWholeCatalog()
         && agedCleanupRulesIgnoreRecentFiles()
-        && criticalOptimizationActionsProvideInverseOperations();
+        && criticalOptimizationActionsProvideInverseOperations()
+        && safeOptimizationCatalogIsCategorizedAndReversible();
     return ok ? 0 : 1;
 }

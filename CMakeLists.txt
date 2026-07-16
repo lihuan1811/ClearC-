@@ -86,6 +86,8 @@ if(BUILD_TESTING)
         src/CleanupEngine.cpp
         src/FileManagementEngine.h
         src/FileManagementEngine.cpp
+        src/SoftwareUninstallEngine.h
+        src/SoftwareUninstallEngine.cpp
         src/SystemCatalog.h
         src/SystemCatalog.cpp
     )
